@@ -1,0 +1,69 @@
+# ---- 运行时产物 ----------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- 用户数据（每个人的都不一样，绝对不能进仓库）-------------------------
+# data/ 里绝大部分是"你机器上的状态"：通知、课表、备份、浏览器配置。
+# 仓库里只保留结构，具体文件全部忽略。
+data/*
+!data/.gitkeep
+!data/inbox/
+!data/archive/
+data/inbox/*
+!data/inbox/.gitkeep
+data/archive/*
+!data/archive/.gitkeep
+
+# 明确点名（防止上面规则写漏）
+data/events.json
+data/events.cleared-*.json
+data/timetable.json
+data/timetable.json.bak
+data/timetable*.json
+data/state.json
+data/client.json
+data/*.lock
+data/panel.stop
+data/client.show
+data/client.quit
+data/panel.log
+data/browser-profile/
+data/agenda.ico
+
+# ---- 打包出来的成品 ------------------------------------------------------
+dist/
+build/
+*.zip
+*.7z
+*.tar.gz
+screenshot-*.png
+!screenshot-client.png
+!screenshot-panel.png
+
+# ---- 排错时重定向出来的日志（别进仓库）----------------------------------
+*.log
+
+# ---- 工具生成的中间产物 --------------------------------------------------
+# 根目录下的这些 json 是跑 tools/ 里脚本时的输出（里面是**真实课表**，
+# 属于个人数据，不能进仓库）。要留样例就放到 tests/fixtures/ 里。
+/timetable-from-*.json
+/timetable.json
+/events.json
+/state.json
+
+# ---- 系统垃圾 ------------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+*~
+
+# ---- 编辑器 --------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
