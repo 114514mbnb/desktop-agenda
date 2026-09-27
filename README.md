@@ -3,6 +3,26 @@
 把 **QQ 群通知** 和 **课程表** 合并成桌面右侧的常驻时间线，再用一个**客户端控制台**管着它。
 Windows / Python 标准库 / **零第三方依赖** / 自带独立运行时（拷到哪台 Windows 都能直接跑）。
 
+## ⬇ 下载（Windows 10 / 11，64 位）
+
+**👉 [点这里下载最新版](https://github.com/114514mbnb/desktop-agenda/releases/latest)**
+
+在打开的页面里，**Assets** 下面点那个 portable 的 zip（`desktop-agenda-*-portable.zip`，约 19 MB）
+→ 解压到任意文件夹 → 双击 `start-client.cmd`。**不需要安装 Python**，运行时已打包在里面。
+
+```
+1. 下载 zip        2. 右键 → 解压到文件夹（别在压缩包里直接双击）
+3. 双击 start-client.cmd    → 桌面右侧出现日程面板，托盘出现小图标
+4. 若弹出「Windows 已保护你的电脑」→ 更多信息 → 仍要运行
+   （没买代码签名证书而已，不是病毒；源码全在这个仓库里可以自己看）
+```
+
+> ⚠️ **别点绿色的「Code → Download ZIP」**：那是**源代码**，不含运行时，下下来跑不起来。
+> 能直接用的只有 Release 里的那个 zip。
+>
+> 📱 **手机上装不了**：本程序只支持 Windows 电脑。手机上打开本页时，
+> 右侧的「Releases」入口会沉到页面最底部 —— 建议直接用上面那个链接。
+
 > **第一次用先看教程** → [docs/教程.md](docs/教程.md)：每个功能的用法、常见问题处理都在里面。
 > 客户端里随时能打开：**设置 → 查看使用教程**（窗口里可搜索），或 `runtime\python.exe main.py --tutorial`。
 
