@@ -160,14 +160,11 @@ class FestivalBanner(tk.Frame):
             font=fonts.spec(fonts.badge), anchor="w", justify="left",
             wraplength=self.wrap_width,
         )
-        self.tip_label = tk.Label(
-            self, text="点击横幅查看节日寄语", bg=self.festival.banner_bg,
-            fg=_mix(self.festival.banner_fg, self.festival.banner_bg, 0.35),
-            font=fonts.spec(fonts.badge), anchor="w",
-        )
-        self.tip_label.pack(fill="x", padx=int(12 * scale), pady=(0, int(4 * scale)))
 
-        for widget in (self, self.text_label, self.canvas, self.tip_label):
+        # 横幅整块可点：点开就是节日寄语（再点收起）。
+        # 这里**不挂"点击横幅查看节日寄语"那行说明**——用户原话「类似的解释文字都删掉，
+        # 太掉价了」。彩蛋本来就是彩蛋，点一下就出来的东西不需要贴着操作指引。
+        for widget in (self, self.text_label, self.canvas):
             widget.bind("<Button-1>", self.toggle_egg)
         self.canvas.bind("<Configure>", lambda _event: self._redraw())
         self._schedule()
@@ -196,12 +193,9 @@ class FestivalBanner(tk.Frame):
     def toggle_egg(self, _event=None) -> None:
         self.egg_visible = not self.egg_visible
         if self.egg_visible:
-            self.egg_label.pack(fill="x", padx=int(12 * self.scale), pady=(0, int(4 * self.scale)),
-                                before=self.tip_label)
-            self.tip_label.configure(text="再次点击可收起")
+            self.egg_label.pack(fill="x", padx=int(12 * self.scale), pady=(0, int(4 * self.scale)))
         else:
             self.egg_label.pack_forget()
-            self.tip_label.configure(text="点击横幅查看节日寄语")
 
     # -- 动画 ------------------------------------------------------------
     def _schedule(self) -> None:

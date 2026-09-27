@@ -53,6 +53,26 @@ PORTABLE_EXTRA_EXCLUDE_EXACT = {
 }
 #: 源码仓库里额外不要的（大二进制 + 个人数据）
 SOURCE_EXCLUDE_DIRS = EXCLUDE_DIRS | {"runtime"}
+#: 便携版里**用不到**的运行时组件（按相对路径前缀匹配，只作用于 runtime/ 内部）。
+#: python-build-standalone 会把整套开发/编辑器组件一起发出来，本项目一个都用不上：
+#:   runtime/Lib/site-packages  pip（10.2 MB，实机确认里面只有 pip 和它的 dist-info）
+#:   runtime/Lib/ensurepip      `python -m ensurepip` 专用
+#:   runtime/Lib/idlelib        IDLE 编辑器
+#:   runtime/Lib/turtledemo     海龟画图示例
+#:   runtime/include、libs      编译 C 扩展用的头文件与导入库
+#:   runtime/Scripts            空的 pip 脚本目录
+#: 实测合计约 15.5 MB（解压后），zip 相应小 4～5 MB；运行时行为不受影响。
+#: **注意别删** Lib/encodings、DLLs、tcl、Lib/unittest——前三个是解释器和 tkinter 的命脉，
+#: unittest 是随包发布的 370 项测试要用的。
+RUNTIME_TRIM_PREFIXES = (
+    "runtime/Lib/site-packages",
+    "runtime/Lib/ensurepip",
+    "runtime/Lib/idlelib",
+    "runtime/Lib/turtledemo",
+    "runtime/include",
+    "runtime/libs",
+    "runtime/Scripts",
+)
 #: `data/` 目录**只允许**这几个文件进产物，其余一律不放，并且打印出来。
 #: 为什么用白名单而不是继续往 EXCLUDE_FILES 里加名字：加名字永远慢一步 ——
 #: 这一次就漏了 `data/calendar.json`（你的放假区间 + 调休安排，属于个人数据）
@@ -72,6 +92,16 @@ SCREENSHOT_PREFIXES = ("screenshot-",)
 
 def log(message: str) -> None:
     print(f"  {message}", flush=True)
+
+
+def measure_paths(prefixes: tuple[str, ...]) -> float:
+    """量一下这些相对路径加起来有多大（MB），用来在打包日志里报告瘦身效果。"""
+    total = 0
+    for prefix in prefixes:
+        target = PROJECT / prefix
+        if target.exists():
+            total += sum(item.stat().st_size for item in target.rglob("*") if item.is_file())
+    return total / 1024 / 1024
 
 
 def force_rmtree(path: Path) -> None:
@@ -99,12 +129,20 @@ def copy_tree(src: Path, dst: Path, exclude_dirs: set[str], exclude_files: set[s
               *, keep_data_files: set[str] = frozenset(),
               extra_prefixes: tuple[str, ...] = (),
               extra_exact: set[str] = frozenset(),
+              skip_prefixes: tuple[str, ...] = (),
               skipped: list[str] | None = None) -> int:
-    """复制目录。返回复制的文件数。"""
+    """复制目录。返回复制的文件数。
+
+    `skip_prefixes` 是按**相对路径前缀**排除（例如 `runtime/Lib/idlelib`），
+    比按目录名排除精确：不会误伤项目里同名的目录。
+    """
     count = 0
     for item in src.rglob("*"):
         rel = item.relative_to(src)
         if any(part in exclude_dirs for part in rel.parts):
+            continue
+        posix = "/".join(rel.parts)
+        if any(posix == prefix or posix.startswith(prefix + "/") for prefix in skip_prefixes):
             continue
         if item.is_dir():
             continue
@@ -144,11 +182,14 @@ def main() -> int:
     # ---- 便携版（整包，不含个人数据）----------------------------------
     log("打包便携版…")
     PORTABLE.mkdir(parents=True, exist_ok=True)
+    trimmed = measure_paths(RUNTIME_TRIM_PREFIXES)
+    log(f"运行时瘦身：跳过 {trimmed:.1f} MB（pip / IDLE / 头文件 / 示例等，运行时用不到）")
     skipped_private: list[str] = []
     files = copy_tree(PROJECT, PORTABLE, EXCLUDE_DIRS, EXCLUDE_FILES,
                       extra_exact=PORTABLE_EXTRA_EXCLUDE_EXACT,
                       extra_prefixes=SCREENSHOT_PREFIXES,
                       keep_data_files=KEEP_SCREENSHOTS,
+                      skip_prefixes=RUNTIME_TRIM_PREFIXES,
                       skipped=skipped_private)
     # data 目录结构留着（空目录 + .gitkeep 说明），否则第一次启动要自己建
     for sub in ("inbox", "archive"):

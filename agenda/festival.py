@@ -279,73 +279,115 @@ def occurrences_near(day: Date) -> list[Festival]:
     return found
 
 
-def _name_matches(holiday_name: str, festival_name: str) -> bool:
-    """假期名和节日名对不对得上（"国庆节" / "国庆" / "国庆、中秋节" 都算）。"""
-    def clean(value: str) -> str:
-        return str(value or "").replace("节", "").replace(" ", "").strip()
-    left, right = clean(holiday_name), clean(festival_name)
-    if not left or not right:
+def _own_span_contains(day: Date, festival: Festival) -> bool:
+    """这一天是不是落在**这个节日自己的天数**里。
+
+    `suggested_span` 本来是用来预填连休的（节日前 N 天 / 后 M 天），它同时也是
+    "这个节日自然占几天"的准确描述：中秋 (0, 0) 就是一天，国庆 (0, 6) 是七天，
+    春节 (1, 6)、劳动节 (0, 4) 同理。
+    """
+    if festival.day is None:
         return False
-    return left == right or right in left or left in right
+    before, after = festival.suggested_span
+    return festival.day - timedelta(days=before) <= day <= festival.day + timedelta(days=after)
+
+
+#: 假期区间和节日日期的**容差**：节日落在区间里就算数；偏离区间边界这么多天的也算
+#: （法定假期的起止偶尔和节日当天差一天，比如节前一天开始连休）。
+_RANGE_REACH_DAYS = 1
+#: 只对得上一个节日的区间，长度不超过这么多天时才认为"整段都是它的假期"。
+#: 再长的（比如一个月的寒假里只有春节）只覆盖节日自己的天数，不然整个寒假都挂着春节横幅。
+_SINGLE_RANGE_MAX_DAYS = 10
+
+
+def _matching_festivals(holiday) -> list[Festival]:
+    """这个假期区间该放哪些节日的彩蛋。
+
+    **只看日历里的日期，不看假期叫什么名字**（用户要求：「彩蛋的触发依据是你内置的
+    农历以及日历」）。判定就是一句：这个节日的日期落在这个区间里（容差
+    `_RANGE_REACH_DAYS` 天）。所以假期叫"中秋国庆连放"也好、改成"放假"也好，效果一样。
+
+    注意不能用"区间前后 10 天内的节日都算"这种宽松判据：国庆 10/1–10/8 那个假期
+    离中秋只差 6 天，那样会被当成"中秋+国庆"的合并区间，反而把 10/8 挤出彩蛋范围。
+    """
+    inside: list[Festival] = []
+    for festival in occurrences_near(holiday.start):
+        if festival.day is None:
+            continue
+        if (holiday.start - timedelta(days=_RANGE_REACH_DAYS)
+                <= festival.day
+                <= holiday.end + timedelta(days=_RANGE_REACH_DAYS)):
+            inside.append(festival)
+    inside.sort(key=lambda item: item.day or holiday.start)
+    return inside
 
 
 def festival_for(day: Date, calendar=None, *, window: int | None = None) -> Festival | None:
     """这一天该放哪个节日的彩蛋（没有就返回 None）。
 
-    三条触发路径（用户要求"范围大一点，原先的保留"）：
-      1. **节日当天**（原先就有）；
-      2. 落在 `calendar.json` 里**同名**假期区间内（原先就有，国庆 10/1–10/8 整段）；
-      3. 新增：节日前后各 `FESTIVAL_WINDOW_DAYS` 天（默认 3 天）也进入节日状态；
+    触发路径：
+      1. **节日当天**；
+      2. 落在 `calendar.json` 里**同名**假期区间内：
+         - 区间只对得上**一个**节日（国庆 10/1–10/7、清明三天…）→ 整段都是它的气氛（原行为）；
+         - 区间对得上**多个**节日（典型的是合并写法"中秋国庆连放"）→ **按各节日自己的天数
+           分段**，谁的那几天归谁，不属于任何节日的日子**没有彩蛋**（恢复原样）。
+      3. 节日前后各 `FESTIVAL_WINDOW_DAYS` 天（默认 3 天）也进入节日状态；
          假期刚结束的收尾期内同样保留（`calendar.wrap_up`）。
+
+    第 2 条的"多节日分段"是用户反馈之后加的。原来是"名字对得上的第一个节日吃掉整段"，
+    于是 `中秋国庆连放`（9/25–10/7）整段都算中秋：用户 9/28 看到"中秋 已过 3 天"，
+    更离谱的是国庆假期里的 10/5 显示"中秋 已过 10 天"——**国庆自己的假期反而没有国庆**。
     """
     span = FESTIVAL_WINDOW_DAYS if window is None else max(0, int(window))
+    holiday = calendar.holiday_on(day) if calendar is not None else None
+    if holiday is not None:
+        matched = _matching_festivals(holiday)
+        if len(matched) > 1:
+            # 合并区间（如"中秋国庆连放"）：按各节日自己的天数分段，谁的那几天归谁，
+            # 中间不属于任何节日的日子就**没有彩蛋**（中秋过了就恢复原样）。
+            for festival in matched:
+                if _own_span_contains(day, festival):
+                    return festival
+            return None
+        if len(matched) == 1:
+            festival = matched[0]
+            length = (holiday.end - holiday.start).days + 1
+            if length <= _SINGLE_RANGE_MAX_DAYS:
+                return festival             # 单一节日的假期：整段都有气氛
+            if _own_span_contains(day, festival):
+                return festival             # 区间太长（如整个寒假）：只覆盖节日自己的天数
+            return None
+
+    # 不在假期区间里（或这个区间对不上任何节日）：节日当天 / 前后 N 天
     if isinstance(day, Date):
         for festival in festival_occurrences(day.year):
             if festival.day == day:
                 return festival
         if span:
-            # 前后 N 天：取最近的那个节日。
             # 注意不能拿 `festival_occurrences` 返回的对象做 `is` 比较 ——
             # 每次调用都会重新构造对象，身份永远对不上（踩过）。
             nearby = _nearest(day, span)
             if nearby is not None:
                 return nearby
+
     if calendar is None:
         return None
-    holiday = calendar.holiday_on(day)
-    if holiday is None:
-        # 假期结束后的收尾期也保持节日状态（和"收心倒计时"配套）。
-        # 注意要取**离这个假期最近的**那一年，不能拿"第一个名字对得上的"：
-        # occurrences_near 会翻前后三年，先撞上的是去年那个国庆
-        # （实测"已过 373 天"）。
-        wrap_up = calendar.wrap_up(day)
-        if wrap_up is not None:
-            nearby_best: tuple[int, Festival] | None = None
-            for festival in occurrences_near(wrap_up.holiday.end):
-                if festival.day is None or not _name_matches(wrap_up.holiday.name, festival.name):
-                    continue
-                distance = abs((festival.day - wrap_up.holiday.end).days)
-                if distance > 10:
-                    continue
-                if nearby_best is None or distance < nearby_best[0]:
-                    nearby_best = (distance, festival)
-            return nearby_best[1] if nearby_best is not None else None
+    # 假期结束后的收尾期也保持节日状态（和"收心倒计时"配套）。
+    # 只看**日期**够不够近，不看假期叫什么（用户要求），而且要取离这个假期最近的
+    # 那一年：occurrences_near 会翻前后三年，先撞上的是去年那个国庆（实测"已过 373 天"）。
+    wrap_up = calendar.wrap_up(day)
+    if wrap_up is None:
         return None
-    best: tuple[int, Festival] | None = None
-    for festival in occurrences_near(holiday.start):
-        if festival.day is None or not _name_matches(holiday.name, festival.name):
+    nearby_best: tuple[int, Festival] | None = None
+    for festival in occurrences_near(wrap_up.holiday.end):
+        if festival.day is None:
             continue
-        # 假期区间和节日日期不能离太远（防止"国庆节"这个假被填到三月去）
-        distance = 0
-        if festival.day < holiday.start:
-            distance = (holiday.start - festival.day).days
-        elif festival.day > holiday.end:
-            distance = (festival.day - holiday.end).days
+        distance = abs((festival.day - wrap_up.holiday.end).days)
         if distance > 10:
             continue
-        if best is None or distance < best[0]:
-            best = (distance, festival)
-    return best[1] if best is not None else None
+        if nearby_best is None or distance < nearby_best[0]:
+            nearby_best = (distance, festival)
+    return nearby_best[1] if nearby_best is not None else None
 
 
 def _nearest(day: Date, span: int) -> Festival | None:
@@ -395,9 +437,14 @@ def hint_for(day: Date, calendar=None) -> FestivalHint | None:
         return None
     holiday = calendar.holiday_on(day) if calendar is not None else None
     wrap_up = calendar.wrap_up(day) if calendar is not None else None
+    # 「在假期里」= 这个假期区间确实属于这个节日（按日期判定，不看名字）
+    in_holiday = bool(
+        holiday is not None
+        and any(item.key == festival.key for item in _matching_festivals(holiday))
+    )
     return FestivalHint(
         festival=festival,
-        in_holiday=holiday is not None and _name_matches(holiday.name, festival.name),
+        in_holiday=in_holiday,
         holiday_name=holiday.name if holiday is not None else "",
         days_until=festival.days_until(day),
         offset=(day - festival.day).days if festival.day is not None else 0,

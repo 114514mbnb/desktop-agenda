@@ -106,23 +106,41 @@ class FestivalBannerTests(unittest.TestCase):
         self.assertIsNone(self.panel._festival_banner, "节日过完了横幅必须撤掉")
 
     def test_border_takes_the_festival_color(self):
-        """用户要求：日程表的边框要和节日主题吻合。"""
+        """用户要求：日程表的边框要和节日主题吻合。
+
+        边框是**动画**的：在节日主色和面板底色之间来回混（"呼吸"）。
+        所以这里不能断言某个瞬间的具体颜色——那取决于采样时动画跑到哪一帧，
+        是个竞态（真踩过：同一条用例时过时不过，因为 `update()` 一次正好可能
+        把第一帧跑掉，也可能没跑）。改成断言与相位无关的性质：
+          * 进节日后边框不再是普通边框色，且边框加粗；
+          * 连续采样能看到**颜色在变**（= 真的在呼吸），且始终不回退成普通边框色；
+          * 离开节日后恢复成普通边框色与细边框。
+        """
+        import time
+
+        def sample_border(times: int = 14, gap: float = 0.03) -> list[str]:
+            seen: list[str] = []
+            for _ in range(times):
+                self.panel.root.update()
+                seen.append(self.panel.outer.cget("bg").lower())
+                time.sleep(gap)
+            return seen
+
         self._go_to(Date(2026, 11, 15))        # 离节日远：普通细边框
-        normal = self.panel.outer.cget("bg")
+        normal = self.panel.outer.cget("bg").lower()
         self.assertEqual(self.panel.shell.pack_info()["padx"], self.panel.FRAME_PAD)
 
         self._go_to(Date(2026, 9, 25))
-        festival_color = self.panel.outer.cget("bg")
-        self.assertNotEqual(festival_color.lower(), normal.lower(),
-                            "节日当天边框应换成节日主色")
         self.assertEqual(self.panel.shell.pack_info()["padx"], self.panel.FESTIVAL_FRAME_PAD,
                          "节日期间边框应加粗")
-        accent = self.panel._festival_banner.festival.accent
-        self.assertNotEqual(festival_color.lower(), accent.lower(),
-                            "边框颜色会跟着动画在节日主色之间呼吸")
+        samples = sample_border()
+        self.assertTrue(all(color != normal for color in samples),
+                        f"节日期间边框不该退回普通边框色：{sorted(set(samples))}")
+        self.assertGreater(len(set(samples)), 1,
+                           f"边框颜色没有在「呼吸」（采样到的都是 {samples[0]}）")
 
         self._go_to(Date(2026, 11, 15))
-        self.assertEqual(self.panel.outer.cget("bg").lower(), normal.lower())
+        self.assertEqual(self.panel.outer.cget("bg").lower(), normal)
         self.assertEqual(self.panel.shell.pack_info()["padx"], self.panel.FRAME_PAD)
 
     def test_post_holiday_countdown_strip(self):
@@ -148,11 +166,25 @@ class FestivalBannerTests(unittest.TestCase):
         self.assertTrue(banner.egg_visible)
         self.assertTrue(banner.egg_label.winfo_ismapped(), "彩蛋文字没显示出来")
         self.assertIn("婵娟", banner.egg_label.cget("text"))
-        self.assertIn("收起", banner.tip_label.cget("text"))
         banner.toggle_egg()
         self.panel.root.update()
         self.assertFalse(banner.egg_visible)
         self.assertFalse(banner.egg_label.winfo_ismapped())
+
+    def test_the_banner_has_no_operating_instructions(self):
+        """横幅上不该挂「点击横幅查看节日寄语」这类操作说明。
+
+        用户原话：「把图二的那行字删掉，同时类似的解释文字都删掉，太掉价了」。
+        横幅整块可点就够了。
+        """
+        self._go_to(Date(2026, 9, 25))
+        banner = self.panel._festival_banner
+        texts = [child.cget("text") for child in banner.winfo_children()
+                 if hasattr(child, "cget") and "text" in child.keys()]
+        for text in texts:
+            self.assertNotIn("点击横幅", text, f"横幅上还留着操作说明：{text}")
+            self.assertNotIn("收起", text, f"横幅上还留着操作说明：{text}")
+        self.assertFalse(hasattr(banner, "tip_label"), "说明标签应当整个删掉")
 
     def test_banner_has_an_animation_job_and_stops_cleanly(self):
         self._go_to(Date(2026, 9, 25))
@@ -182,7 +214,15 @@ class FestivalBannerTests(unittest.TestCase):
         """日期头每次重排都新建 —— 旧的必须销毁，否则一天下来攒上万个控件。"""
         for offset in range(4):
             self._go_to(Date(2026, 10, 2 + offset))
-            self.assertEqual(len(self.panel._day_heads), len(self.panel.timeline.sections))
+            if not self.panel.timeline.total_cards:
+                # 整周都没有安排：只画一句空状态提示，不建任何日期头
+                self.assertEqual(self.panel._day_heads, [],
+                                 "空状态下还留着日期头引用")
+                continue
+            # 只给"有安排的日子 + 今天"建日期头（空着的未来日子不占版面）
+            visible = [section for section in self.panel.timeline.sections
+                       if section.cards or section.is_today]
+            self.assertEqual(len(self.panel._day_heads), len(visible))
         heads = [child for child in self.panel.inner.winfo_children()
                  if child.winfo_class() == "Frame"]
         # 缓存复用的卡片 + 当前这一轮的日期头，不该是历史累积量

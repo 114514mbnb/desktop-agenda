@@ -59,6 +59,28 @@ class TutorialFileTests(unittest.TestCase):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text)
 
+    def test_tutorial_documents_the_new_capabilities(self):
+        """新加的三样功能必须在教程里有位置，否则用户只能用猜的。
+
+        盯的是"用户能不能自学"：每个功能至少要写清入口在哪、怎么用、有什么前提
+        （例如热键需要面板在运行、照片会被转存、体检只检查不自动改）。
+        """
+        text = tutorial.tutorial_path().read_text(encoding="utf-8")
+        for phrase in (
+            "剪贴板全局热键", "检测并保存", "被别的程序占用",   # 热键
+            "面板主题", "随时刻", "我的照片", "data\\theme",     # 主题
+            "课表体检", "建议核对", "不会自动修改课表",           # 体检
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text)
+
+    def test_tutorial_has_five_ways_to_add_notices(self):
+        """通知录入口从四种变成五种（新增剪贴板热键），标题和目录要一起改。"""
+        text = tutorial.tutorial_path().read_text(encoding="utf-8")
+        self.assertIn("把群通知加进来（五种方式）", text)
+        self.assertIn("方式五：收件箱", text)
+        self.assertNotIn("把群通知加进来（四种方式）", text)
+
     def test_tutorial_uses_the_labels_that_actually_exist(self):
         """文档里写的按钮/菜单名必须和程序里的一模一样。
 
@@ -67,8 +89,9 @@ class TutorialFileTests(unittest.TestCase):
         """
         text = tutorial.tutorial_path().read_text(encoding="utf-8")
         for phrase in ("清空通知", "清空课程表", "删除所选", "最小化至托盘",
-                       "打开客户端窗口", "呼出客户端窗口", "点击横幅查看节日寄语",
+                       "打开客户端窗口", "呼出客户端窗口",
                        "暂无日程安排", "假期、调休与节日彩蛋",
+                       "编辑此条通知…",
                        # 面板右下角那个小齿轮是设置入口，教程必须写清楚它叫什么
                        "日程表设置…", "⚙"):
             with self.subTest(phrase=phrase):
@@ -80,6 +103,10 @@ class TutorialFileTests(unittest.TestCase):
         for phrase in ("清空全部通知", "标记完成（从日程里去掉）", "复制这条内容",
                        "编辑选中", "删除选中", "点一下这条横幅", "当前暂无相关日程",
                        "打开控制台", "最小化到托盘", "桌面模式下让面板不吃鼠标",
+                       # 横幅上那行操作说明按用户要求删掉了，文档也不许再提
+                       "点击横幅查看节日寄语",
+                       # 彩蛋不再依赖假期名，这句老话必须消失
+                       "名称需与节日一致", "名字要和节日对得上",
                        # 第 18 轮反馈：这两样从设置页删掉了，"（原方案）"也不许再提
                        "（原方案）", "自动整合 inbox 间隔"):
             with self.subTest(phrase=phrase):

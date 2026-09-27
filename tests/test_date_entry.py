@@ -16,9 +16,16 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agenda.date_entry import DateEntry  # noqa: E402
+from tests import ClipboardSafeTestCase  # noqa: E402
 
 
-class DateEntryTests(unittest.TestCase):
+class DateEntryTests(ClipboardSafeTestCase):
+    """日期输入控件。
+
+    `test_paste_splits_into_three_fields` 要往剪贴板里写一个日期才能验粘贴，
+    所以这个类继承 `ClipboardSafeTestCase`——不还原的话，用户"粘贴"到别处的
+    会是测试用的 `2026-10-01`，他大概会以为剪贴板坏了。
+    """
     def setUp(self):
         import tkinter as tk
         try:

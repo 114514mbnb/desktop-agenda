@@ -87,6 +87,27 @@ def main() -> int:
 
     python = root / "runtime" / "python.exe"
 
+    # 2b) 瘦身生效：运行时里不该再有 pip / IDLE / 头文件这些用不到的东西
+    print("\n[2b] 便携版瘦身")
+    TRIM_MUST_BE_GONE = ("runtime/Lib/site-packages", "runtime/Lib/ensurepip",
+                         "runtime/Lib/idlelib", "runtime/include", "runtime/libs")
+    leftovers = [prefix for prefix in TRIM_MUST_BE_GONE if (root / prefix).exists()]
+    must_keep = ("runtime/python.exe", "runtime/Lib/tkinter", "runtime/DLLs",
+                 "runtime/Lib/unittest", "runtime/tcl")
+    missing = [prefix for prefix in must_keep if not (root / prefix).exists()]
+    if leftovers:
+        ok = False
+        for prefix in leftovers:
+            print(f"    ✗ 没瘦掉：{prefix}")
+    else:
+        print("    ✓ pip / IDLE / 头文件等已剔除")
+    if missing:
+        ok = False
+        for prefix in missing:
+            print(f"    ✗ 误删了运行必需的：{prefix}")
+    else:
+        print("    ✓ 解释器 / tkinter / DLL / unittest 都还在")
+
     # 3) 测试
     print("\n[3] 跑测试（自带运行时 + 解压后的副本）")
     code, output = run([str(python), "-B", "-m", "unittest", "discover", "-s", "tests", "-t", "."],

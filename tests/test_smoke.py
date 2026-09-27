@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+import ast
+import builtins
 import compileall
 import importlib
 import sys
@@ -18,6 +20,59 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+_BUILTIN_NAMES = set(dir(builtins)) | {
+    "__file__", "__name__", "__doc__", "__package__", "__spec__", "__loader__",
+    "__builtins__", "__debug__", "__path__", "WindowsError",
+}
+
+
+def _bound_names(tree: ast.AST) -> set[str]:
+    """把一个模块里**任何地方**出现过的绑定名都收进来。
+
+    刻意用宽松的近似（不区分作用域）：这里要抓的是"整个文件都没导入 ttk"这类错误，
+    宁可漏报也不要误报。
+    """
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                names.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    names.add(alias.asname or alias.name)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.arg):
+            names.add(node.arg)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            names.update(node.names)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and getattr(node, "name", None):
+            names.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            names.add(node.rest)
+    return names
+
+
+def _undefined_names(source: str, filename: str) -> list[str]:
+    tree = ast.parse(source, filename=filename)
+    used = {
+        node.id for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+    }
+    return sorted(used - _bound_names(tree) - _BUILTIN_NAMES)
+
+
+def _project_sources() -> list[Path]:
+    files = sorted((ROOT / "agenda").rglob("*.py"))
+    files += sorted((ROOT / "tools").glob("*.py"))
+    files.append(ROOT / "main.py")
+    return [path for path in files if "__pycache__" not in path.parts]
 
 MODULES = (
     "agenda.models",
@@ -82,6 +137,62 @@ class SmokeTests(unittest.TestCase):
             except Exception as error:  # noqa: BLE001
                 failures.append(f"{name}: {type(error).__name__}: {error}")
         self.assertEqual(failures, [], "模块导入失败：\n" + "\n".join(failures))
+
+    def test_no_module_uses_a_name_it_never_bound(self):
+        """静态抓"用了没导入的名字"。
+
+        真踩过：`agenda/panel.py` 用了 `ttk.Combobox` 和 `messagebox.askyesno`，
+        但文件里只 `from tkinter import ...` 没带这两个名字。
+        `compileall` 照样通过（语法没错），模块**导入**也照样成功
+        （`ttk` / `messagebox` 是在函数体里才被查的），
+        只有用户真的点了「修改结束时间…」「删除此条…」才炸 NameError——
+        而右键菜单点下去像没反应，用户只会以为"这几个功能有 BUG"。
+        所以补一道静态闸门：文件里用到的每个 Load 名字，必须在文件里被绑定过。
+        """
+        failures: list[str] = []
+        for path in _project_sources():
+            source = path.read_text(encoding="utf-8")
+            try:
+                missing = _undefined_names(source, str(path))
+            except SyntaxError as error:              # 交给 compileall 那份测试去报
+                failures.append(f"{path.relative_to(ROOT)}: 语法错误 {error}")
+                continue
+            if missing:
+                failures.append(f"{path.relative_to(ROOT)}: {', '.join(missing)}")
+        self.assertEqual(
+            failures, [],
+            "这些文件用到了没有导入/没有定义的名字（一调用就 NameError）：\n"
+            + "\n".join(failures),
+        )
+
+    def test_the_undefined_name_gate_actually_bites(self):
+        """防止上面那道闸门哪天坏成"永远通过"。"""
+        broken = "def f():\n    return ttk.Combobox()\n"
+        self.assertEqual(_undefined_names(broken, "broken.py"), ["ttk"])
+        self.assertEqual(_undefined_names("import ttk\ndef f():\n    return ttk.x\n", "ok.py"), [])
+        self.assertEqual(
+            _undefined_names("from tkinter import ttk\ndef f():\n    return ttk.x\n", "ok.py"), [])
+
+    def test_clipboard_guard_is_installed(self):
+        """测试进程必须给剪贴板套上"先存原内容、退出时还原"。
+
+        为什么值得钉住：`tools/verify_release.py` 是在**用户自己的机器上**跑全套测试的。
+        曾经有个用例把「【提醒】1.只用剪贴板：明天之内提交材料。」留在用户剪贴板里，
+        他随后按一下热键，面板把这句测试文本当成真通知录进了真实数据
+        —— 界面里凭空多出一条日程，他还以为"识别的不对"。
+        两道防线都要在：`agenda.hotkey` 那条（程序自己用）和 `tkinter` 那条（控件用）。
+        """
+        import tkinter
+
+        import tests as tests_package  # noqa: F401  （导入即安装安全网）
+        from agenda import hotkey
+
+        self.assertTrue(getattr(hotkey.write_clipboard_text, "tests_clipboard_guard", False),
+                        "agenda.hotkey.write_clipboard_text 没有被测试安全网包住")
+        self.assertTrue(getattr(tkinter.Misc.clipboard_clear, "tests_clipboard_guard", False),
+                        "tkinter 的 clipboard_clear 没有被包住（DateEntry 那条路径会漏）")
+        self.assertTrue(getattr(tkinter.Misc.clipboard_append, "tests_clipboard_guard", False),
+                        "tkinter 的 clipboard_append 没有被包住")
 
     def test_gui_entrypoints_exist(self):
         """关键类/函数真的在，避免改名后调用方没跟上。"""

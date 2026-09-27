@@ -134,6 +134,11 @@ class PanelRestoreLatencyTests(unittest.TestCase):
                 # 全屏应用出现 → 面板离开屏幕
                 winlayer.fullscreen_foreground = lambda: True
                 panel._apply_foreground_change()
+                self.assertFalse(panel._hidden_offscreen,
+                                 "一闪而过的全屏窗口不该让面板隐身（截图遮罩就是这样）")
+                # 让它持续一段时间（模拟真的在看游戏/视频）→ 这才隐身
+                panel._fullscreen_since = time.monotonic() - 5
+                panel._apply_foreground_change()
                 self.assertTrue(panel._hidden_offscreen, "全屏时面板应当离开屏幕")
                 # 切回桌面 → 面板要马上回来
                 winlayer.fullscreen_foreground = lambda: False
@@ -170,6 +175,8 @@ class PanelRestoreLatencyTests(unittest.TestCase):
             panel._hidden_offscreen = False
             panel._hwnd = 0
             panel.hide_instant = lambda: setattr(panel, "_hidden_offscreen", True)
+            panel._apply_foreground_change()
+            panel._fullscreen_since = time.monotonic() - 5      # 模拟全屏已持续了一段时间
             panel._apply_foreground_change()
             hidden = panel._hidden_offscreen
         finally:
@@ -234,6 +241,8 @@ class PetLayerTests(unittest.TestCase):
         try:
             panel = self._fake_panel(pet_mode=True)
             panel.desktop_only = True
+            panel._desktop_watch()
+            panel._fullscreen_since = time.monotonic() - 5      # 全屏已经持续了一会儿
             panel._desktop_watch()
             hidden = panel.hidden
         finally:
@@ -473,8 +482,39 @@ class PanelWakeHookTests(unittest.TestCase):
             finally:
                 panel.quit()
 
-    def test_power_message_restores_the_panel_immediately(self):
-        """往窗口发一条「显示器状态变了」，面板要马上回到屏幕上。"""
+    def _pump(self, panel, seconds: float = 0.6) -> None:
+        """让 Tk 跑一会儿，好让 `_native_tick` 把窗口过程攒下的待办执行掉。"""
+        import time
+
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            panel.root.update()
+            time.sleep(0.01)
+
+    def test_wake_callback_only_sets_a_flag(self):
+        """**窗口过程里不许碰 Tk**——这是进程硬崩的根因，必须钉住。
+
+        实测：在子类过程里调 `_apply_foreground_change()` / `ingest_clipboard()`
+        这种带 Tk 调用的代码，会让面板进程当场消失（无异常、panel.log 为空）。
+        所以回调只允许置标记，真正的活儿交给 `_native_tick`。
+        """
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            panel = self._panel(tmp)
+            try:
+                panel.root.update()
+                panel._wake_pending = False
+                panel._hidden_offscreen = False
+                panel._on_system_wake("power")
+                self.assertTrue(panel._wake_pending, "没有留下待办标记")
+                self.assertFalse(panel._hidden_offscreen,
+                                 "回调里就把界面动了——这正是会崩的写法")
+            finally:
+                panel.quit()
+
+    def test_power_message_restores_the_panel(self):
+        """往窗口发一条「显示器状态变了」，面板要很快回到屏幕上（一个 tick 之内）。"""
         import tempfile
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -507,7 +547,9 @@ class PanelWakeHookTests(unittest.TestCase):
                     winlayer.PBT_POWERSETTINGCHANGE, 0)
                 panel.root.update()
                 self.assertEqual(calls, ["power"], "系统消息没有触发唤醒回调")
-                self.assertFalse(panel._hidden_offscreen, "面板没有立刻回到屏幕上")
+
+                self._pump(panel)
+                self.assertFalse(panel._hidden_offscreen, "面板没有回到屏幕上")
             finally:
                 try:
                     winlayer.unhook_wake_events(panel._hwnd)
@@ -573,6 +615,89 @@ class PanelEscapeKeyTests(unittest.TestCase):
         self.assertTrue(alive, "ESC 把面板窗口关掉了")
         self.assertEqual(calls, ["hide"], "ESC 应该收起面板")
         self.assertTrue(user_hidden, "收起要标记成「用户主动收起」，不然监控会立刻把它拉回来")
+
+
+class ScreenshotDoesNotSwallowThePanelTests(unittest.TestCase):
+    """截图工具的遮罩会被当成"全屏应用" —— 面板不能因此把自己挪走。
+
+    用户原话：「发现BUG截图后会导致弹窗消失，这是为什么？」
+    他的截图工具一启动，前台就出现一个覆盖全屏、位于 (0,0) 的遮罩，
+    正好命中面板"游戏/视频时隐身"的判据 → 面板被挪到 -4000,-4000，
+    他正在看的东西整个从视野里没了（详情窗本身其实还在，但没法再互动）。
+
+    两条收紧：**有自己弹的窗开着就不隐身**；**覆盖全屏要持续一会儿才算数**。
+    """
+
+    def _panel(self, tmp):
+        from agenda.panel import AgendaPanel
+
+        panel = AgendaPanel(Path(tmp), pipeline_ms=0, autostart_pipeline=False,
+                            window_mode="desktop", position=(80, 60), desktop_only=True)
+        panel.root.update()
+        panel.refresh()
+        panel.root.update()
+        return panel
+
+    def test_an_open_dialog_stops_the_panel_from_hiding(self):
+        import tempfile
+
+        from agenda import winlayer
+
+        real = winlayer.fullscreen_foreground
+        winlayer.fullscreen_foreground = lambda: True
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                panel = self._panel(tmp)
+                try:
+                    # 先开一个"详情窗"（等价于用户正在看的那个弹窗）
+                    from agenda.timeline import Card
+
+                    panel.show_card_detail(Card(kind="event", title="看这个",
+                                                start="11:00", end=None, date="2026-09-28"))
+                    panel.root.update()
+                    self.assertTrue(panel._has_open_dialog(), "详情窗开着却没被认出来")
+                    # 就算全屏判据成立、就算已经持续很久，也不能把面板挪走
+                    panel._fullscreen_since = time.monotonic() - 60
+                    panel._apply_foreground_change()
+                    self.assertFalse(panel._hidden_offscreen,
+                                     "有弹窗开着的时候把面板挪走了（用户会看到「弹窗消失」）")
+                    # 关掉弹窗之后才允许隐藏（宽限计时从这一刻重新开始）
+                    panel.close_card_detail()
+                    panel.root.update()
+                    self.assertFalse(panel._has_open_dialog(), "详情窗没关干净")
+                    panel._fullscreen_since = time.monotonic() - 60
+                    panel._apply_foreground_change()
+                    self.assertTrue(panel._hidden_offscreen, "弹窗关掉后应当恢复正常隐身逻辑")
+                finally:
+                    panel.root.destroy()
+        finally:
+            winlayer.fullscreen_foreground = real
+
+    def test_a_brief_overlay_does_not_hide_the_panel(self):
+        """一闪而过的遮罩（截图按下快门的那几秒）不该让面板跑掉。"""
+        import tempfile
+
+        from agenda import winlayer
+
+        real = winlayer.fullscreen_foreground
+        winlayer.fullscreen_foreground = lambda: True
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                panel = self._panel(tmp)
+                try:
+                    panel._apply_foreground_change()
+                    self.assertFalse(panel._hidden_offscreen, "刚开始就算全屏，太快了")
+                finally:
+                    panel.root.destroy()
+        finally:
+            winlayer.fullscreen_foreground = real
+
+    def test_the_grace_period_is_short_enough_for_real_games(self):
+        """宽限期不能太长，不然真在看游戏时面板要挡一秒多才让开。"""
+        from agenda.panel import FULLSCREEN_GRACE_MS
+
+        self.assertLessEqual(FULLSCREEN_GRACE_MS, 2000)
+        self.assertGreaterEqual(FULLSCREEN_GRACE_MS, 300, "太短的宽限期挡不住截图遮罩")
 
 
 if __name__ == "__main__":

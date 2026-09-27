@@ -369,6 +369,7 @@ class ControlWindow:
         toolbar.pack(fill="x", padx=12, pady=(10, 6))
         self._button(toolbar, "从文件识别课表…", self.import_course_file, primary=True).pack(side="left", padx=(0, 6))
         self._button(toolbar, "粘贴课表…", self.paste_table_dialog).pack(side="left", padx=(0, 6))
+        self._button(toolbar, "课表体检", self.check_timetable).pack(side="left", padx=(0, 6))
         self._button(toolbar, "导出 WakeUp CSV", self.export_wakeup_csv).pack(side="left", padx=(0, 6))
         self._button(toolbar, "撤销上次导入", self.undo_import).pack(side="left")
 
@@ -1694,6 +1695,9 @@ class ControlWindow:
         radio("常驻待机", "全屏运行其他应用（游戏 / 视频）时面板也不隐藏，始终留在屏幕上",
               False)
 
+        self._build_hotkey_settings(frame)
+        self._build_theme_settings(frame)
+
         # 设置页底部：教程 + 数据目录 —— **常驻**，不在折叠区里，随时点得到。
         # 教程只有"当场能打开"才会被看，所以这里放一个显眼的一级入口。
         help_box = tk.Frame(frame, bg=colors["bg_soft"])
@@ -1722,6 +1726,357 @@ class ControlWindow:
             bg=colors["bg"], fg=colors["text_faint"], justify="left",
             font=("Microsoft YaHei UI", 8),
         ).pack(anchor="w", padx=14, pady=(4, 0))
+
+    # -- 课表体检 --------------------------------------------------------
+    def check_timetable(self) -> None:
+        """跑一遍课表体检，把结论显示在一个可复制的窗口里。
+
+        为什么不直接弹 messagebox：报告可能有好几屏（冲突、缺字段、可疑课名…），
+        用户需要**能选中、能复制**，出问题时才好发给人看。
+        """
+        from .timetable_check import check_timetable
+
+        table = load_timetable(self.controller.data_dir)
+        report = check_timetable(table)
+        text = report.as_text(course_count=len(table.courses) if table else 0,
+                              term_start=table.term_start if table else None)
+        self._show_report_window(report.summary(), text)
+
+    def _show_report_window(self, title: str, body: str) -> None:
+        colors = theme.COLORS
+        window = tk.Toplevel(self.root)
+        window.title("课表体检")
+        window.configure(bg=colors["bg"])
+        window.geometry(f"{int(760 * (self.scale or 1.0))}x{int(560 * (self.scale or 1.0))}")
+        tk.Label(window, text=title, bg=colors["bg"], fg=colors["text"],
+                 font=("Microsoft YaHei UI", 11, "bold"), anchor="w",
+                 ).pack(fill="x", padx=14, pady=(12, 6))
+        box = tk.Frame(window, bg=colors["border"])
+        box.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+        text = tk.Text(box, bg=colors["card"], fg=colors["text"], relief="flat",
+                       wrap="word", font=("Microsoft YaHei UI", 9), padx=10, pady=8)
+        scroll = tk.Scrollbar(box, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", body)
+        text.configure(state="disabled")
+        buttons = tk.Frame(window, bg=colors["bg"])
+        buttons.pack(fill="x", padx=14, pady=(0, 12))
+
+        def copy() -> None:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(body)
+            messagebox.showinfo("已复制", "体检报告已复制到剪贴板。", parent=window)
+
+        def save() -> None:
+            path = filedialog.asksaveasfilename(
+                title="保存体检报告", defaultextension=".txt",
+                initialfile="课表体检报告.txt", filetypes=[("文本文件", "*.txt")],
+                parent=window)
+            if not path:
+                return
+            try:
+                Path(path).write_text(body, encoding="utf-8")
+            except OSError as error:
+                messagebox.showerror("保存失败", str(error), parent=window)
+                return
+            messagebox.showinfo("已保存", f"已保存到：\n{path}", parent=window)
+
+        self._button(buttons, "复制报告", copy, primary=True).pack(side="left")
+        self._button(buttons, "保存为文件…", save).pack(side="left", padx=(6, 0))
+        self._button(buttons, "关闭", window.destroy).pack(side="right")
+
+    # -- 面板主题 --------------------------------------------------------
+    def _build_theme_settings(self, frame) -> None:
+        """主题三选一：经典深色 / 随时刻 / 我的照片。
+
+        主题**不用点「保存设置」**：选完立刻落盘，日程表面板 1 秒内自己换过来
+        （面板每 700 ms 巡检 client.json）。这样用户改主题时能马上看到效果。
+        """
+        colors = theme.COLORS
+        from . import palettes
+
+        config = self.controller.config
+        mode = palettes.normalize_mode(getattr(config, "theme_mode", None))
+        self.theme_mode_var = tk.StringVar(value=mode)
+
+        tk.Label(frame, text="面板主题", bg=colors["bg"], fg=colors["text_dim"],
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14, pady=(10, 2))
+
+        tips = {
+            "classic": "固定配色，不随时间变化",
+            "auto": f"界面跟着天色走，现在是「{palettes.SLOT_LABELS[palettes.slot_for()]}」"
+                    "（清晨 / 白天 / 黄昏 / 深夜 四套）",
+            "photo": "用你自己的照片，文字颜色按背景明暗自动切换",
+        }
+        for key in ("classic", "auto", "photo"):
+            row = tk.Frame(frame, bg=colors["bg"])
+            row.pack(anchor="w", padx=16, pady=1)
+            tk.Radiobutton(
+                row, text=palettes.MODES[key], variable=self.theme_mode_var, value=key,
+                command=self.apply_theme_choice, bg=colors["bg"], fg=colors["text"],
+                selectcolor=colors["card"], activebackground=colors["bg"],
+                activeforeground=colors["text"], font=("Microsoft YaHei UI", 9, "bold"),
+                highlightthickness=0, bd=0, anchor="w", cursor="hand2",
+            ).pack(side="left")
+            tk.Label(row, text=tips[key], bg=colors["bg"], fg=colors["text_faint"],
+                     font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(6, 0))
+
+        photo_row = tk.Frame(frame, bg=colors["bg"])
+        photo_row.pack(anchor="w", padx=32, pady=(2, 0))
+        self._button(photo_row, "选择照片…", self.choose_theme_photo).pack(side="left")
+        self._button(photo_row, "清除照片", self.clear_theme_photo).pack(side="left", padx=(6, 0))
+        self.theme_hint = tk.Label(
+            frame, text="", bg=colors["bg"], fg=colors["text_faint"], anchor="w",
+            justify="left", wraplength=int(700 * (self.scale or 1.0)),
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.theme_hint.pack(anchor="w", padx=32, pady=(2, 0))
+        self._refresh_theme_hint()
+
+    def _refresh_theme_hint(self) -> None:
+        from . import backdrop, palettes
+
+        config = self.controller.config
+        mode = palettes.normalize_mode(getattr(config, "theme_mode", None))
+        if mode == "photo":
+            path = backdrop.background_path(self.controller.data_dir)
+            if path.is_file():
+                size_kb = path.stat().st_size / 1024
+                text = f"已使用：{path.name}（{size_kb:.0f} KB，存在 data\\theme\\ 下）"
+            else:
+                text = "还没有选择照片：点「选择照片…」（支持 JPG / PNG / BMP / GIF）"
+        else:
+            text = palettes.describe(mode)
+        try:
+            self.theme_hint.configure(text=text)
+        except tk.TclError:
+            pass
+
+    def apply_theme_choice(self) -> None:
+        """选完主题立刻生效（不用点保存设置）。"""
+        from . import backdrop
+
+        mode = self.theme_mode_var.get()
+        config = self.controller.config
+        if mode == "photo" and not backdrop.has_background(self.controller.data_dir):
+            # 还没照片就先让他选，别写一个"照片模式但没照片"的状态
+            self.choose_theme_photo()
+            return
+        config.theme_mode = mode
+        self.controller.save()
+        self._refresh_theme_hint()
+
+    def choose_theme_photo(self) -> None:
+        from . import backdrop
+
+        path = filedialog.askopenfilename(
+            title="选择背景照片",
+            filetypes=[("图片", "*.jpg *.jpeg *.png *.bmp *.gif *.webp"), ("所有文件", "*.*")],
+            parent=self.root,
+        )
+        if not path:
+            return
+        ok, message = backdrop.prepare_background(path, self.controller.data_dir)
+        if not ok:
+            messagebox.showwarning("这张照片用不了", message, parent=self.root)
+            return
+        config = self.controller.config
+        config.theme_mode = "photo"
+        config.theme_photo = backdrop.BACKGROUND_NAME
+        self.controller.save()
+        self.theme_mode_var.set("photo")
+        self._refresh_theme_hint()
+        self.theme_hint.configure(text=message)
+
+    def clear_theme_photo(self) -> None:
+        from . import backdrop
+
+        backdrop.clear_background(self.controller.data_dir)
+        config = self.controller.config
+        if getattr(config, "theme_mode", "") == "photo":
+            config.theme_mode = "classic"
+            self.theme_mode_var.set("classic")
+        config.theme_photo = ""
+        self.controller.save()
+        self._refresh_theme_hint()
+
+    # -- 剪贴板热键 ------------------------------------------------------
+    #: Tk 的 keysym → 我们能解析的键名（只列需要改名的，字母数字/F1-F24 直接透传）
+    _KEYSYM_ALIASES = {
+        "space": "Space", "Return": "Enter", "KP_Enter": "Enter", "Escape": "Esc",
+        "BackSpace": "Backspace", "Insert": "Insert", "Delete": "Delete",
+        "Home": "Home", "End": "End", "Prior": "PageUp", "Next": "PageDown",
+        "Up": "Up", "Down": "Down", "Left": "Left", "Right": "Right",
+        "Tab": "Tab", "ISO_Left_Tab": "Tab",
+    }
+    #: 单独按下这些键不算组合键（等用户按完整组合）
+    _MODIFIER_KEYSYMS = {
+        "Control_L", "Control_R", "Alt_L", "Alt_R", "Shift_L", "Shift_R",
+        "Super_L", "Super_R", "Meta_L", "Meta_R", "Caps_Lock", "Num_Lock",
+        "Win_L", "Win_R", "ISO_Level3_Shift",
+    }
+
+    def _build_hotkey_settings(self, frame) -> None:
+        """剪贴板全局热键的设置区。
+
+        为什么要"检测"按钮：热键是**系统级独占**资源，被别的程序占着时登记会直接失败。
+        与其让用户保存完发现按了没反应，不如当场告诉他"这个组合被占用了，换一个"。
+        """
+        colors = theme.COLORS
+        config = self.controller.config
+        tk.Label(frame, text="剪贴板热键", bg=colors["bg"], fg=colors["text_dim"],
+                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14, pady=(10, 2))
+
+        row = tk.Frame(frame, bg=colors["bg"])
+        row.pack(anchor="w", padx=16, pady=1)
+        self.hotkey_enabled_var = tk.BooleanVar(value=bool(getattr(config, "hotkey_enabled", True)))
+        tk.Checkbutton(
+            row, text="启用", variable=self.hotkey_enabled_var, bg=colors["bg"],
+            fg=colors["text_dim"], selectcolor=colors["card"], activebackground=colors["bg"],
+            activeforeground=colors["text"], font=("Microsoft YaHei UI", 9),
+            highlightthickness=0, bd=0,
+        ).pack(side="left")
+
+        self.hotkey_var = tk.StringVar(value=getattr(config, "hotkey", "") or "")
+        self.hotkey_entry = tk.Entry(
+            row, textvariable=self.hotkey_var, width=20, bg=colors["card"],
+            fg=colors["text"], insertbackground=colors["text"], relief="flat",
+            font=("Consolas", 10), justify="center",
+        )
+        self.hotkey_entry.pack(side="left", padx=(8, 6), ipady=3)
+        # 直接按组合键就能填进去，不用手打（手打也支持）
+        self.hotkey_entry.bind("<KeyPress>", self._capture_hotkey)
+        self._button(row, "检测并保存", self.save_hotkey, primary=True).pack(side="left")
+
+        self.hotkey_hint = tk.Label(
+            frame, text="", bg=colors["bg"], fg=colors["text_faint"], anchor="w",
+            justify="left", wraplength=int(700 * (self.scale or 1.0)),
+            font=("Microsoft YaHei UI", 8),
+        )
+        self.hotkey_hint.pack(anchor="w", padx=16, pady=(2, 0))
+
+        # 「选中文字就能识别」的开关：默认开。关掉它就是"只读剪贴板里已有的内容"，
+        # 给不喜欢"程序替我按 Ctrl+C"的人留一条路（终端用户尤其需要）。
+        select_row = tk.Frame(frame, bg=colors["bg"])
+        select_row.pack(anchor="w", padx=16, pady=(4, 0))
+        self.hotkey_selection_var = tk.BooleanVar(
+            value=bool(getattr(config, "hotkey_selection", True)))
+        tk.Checkbutton(
+            select_row, text="按热键时优先识别「选中的文字」", variable=self.hotkey_selection_var,
+            command=self.save_hotkey_selection, bg=colors["bg"], fg=colors["text_dim"],
+            selectcolor=colors["card"], activebackground=colors["bg"],
+            activeforeground=colors["text"], font=("Microsoft YaHei UI", 9),
+            highlightthickness=0, bd=0, anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            select_row,
+            text="（会在前台程序里模拟一次 Ctrl+C，读完把剪贴板恢复原样；终端窗口会自动跳过）",
+            bg=colors["bg"], fg=colors["text_faint"], font=("Microsoft YaHei UI", 8),
+        ).pack(side="left", padx=(6, 0))
+        self._set_hotkey_hint(
+            "在输入框里直接按下想用的组合键（例如 Ctrl+Alt+Q），再点「检测并保存」；"
+            "热键由日程表面板注册，面板未运行时不可用。", faint=True)
+
+        # 打开设置页时就检查一遍**已保存**的组合：组合可能是在规则收紧之前设的
+        # （例如只带 Shift 的 Shift+Z——它会在你打大写字母时被触发）。
+        # 不在这里提示，用户只会看到"面板说临时改用了别的组合"，不知道去哪儿改。
+        from . import hotkey as hotkey_mod
+
+        saved = (getattr(config, "hotkey", "") or "").strip()
+        if saved and bool(getattr(config, "hotkey_enabled", True)):
+            try:
+                hotkey_mod.parse(saved)
+            except hotkey_mod.HotkeyError as error:
+                self._set_hotkey_hint(f"当前保存的热键「{saved}」不可用：{error}", error=True)
+
+    def save_hotkey_selection(self) -> None:
+        """「优先识别选中的文字」开关：即时生效（面板 1 秒内自己读到新配置）。"""
+        config = self.controller.config
+        config.hotkey_selection = bool(self.hotkey_selection_var.get())
+        self.controller.save()
+        state = "已开启：按热键时会尝试抓取前台选中的文字" if config.hotkey_selection \
+            else "已关闭：按热键时只读剪贴板里已有的内容"
+        self._set_hotkey_hint(state)
+
+    def _set_hotkey_hint(self, text: str, *, error: bool = False, faint: bool = False) -> None:
+        colors = theme.COLORS
+        color = "#E0555B" if error else ("#37C978" if not faint else colors["text_faint"])
+        try:
+            self.hotkey_hint.configure(text=text, fg=color)
+        except tk.TclError:
+            pass
+
+    def _capture_hotkey(self, event):
+        """在输入框里按下组合键 → 自动填成规范写法。
+
+        只认"修饰键 + 一个普通键"；单独按 Ctrl/Alt/Shift 时不动输入框（等组合完整）。
+        """
+        keysym = str(event.keysym)
+        if keysym in self._MODIFIER_KEYSYMS:
+            return "break"
+        if keysym in self._KEYSYM_ALIASES:
+            token = self._KEYSYM_ALIASES[keysym]
+        elif len(keysym) == 1 and keysym.isalnum():
+            token = keysym
+        elif keysym.startswith("F") and keysym[1:].isdigit():
+            token = keysym
+        else:
+            self._set_hotkey_hint(f"这个键暂不支持作为热键：{keysym}", error=True)
+            return "break"
+
+        parts: list[str] = []
+        state = int(getattr(event, "state", 0))
+        if state & 0x0004:
+            parts.append("Ctrl")
+        if state & (0x0008 | 0x20000):        # X11 的 Mod1 与 Windows 的 Alt
+            parts.append("Alt")
+        if state & 0x0001:
+            parts.append("Shift")
+        if not parts:
+            self._set_hotkey_hint("至少要带一个修饰键（Ctrl / Alt / Shift）", error=True)
+            return "break"
+        text = "+".join(parts + [token])
+        try:
+            self.hotkey_var.set(text)
+        except tk.TclError:
+            pass
+        self._set_hotkey_hint(f"已填入 {text}，点「检测并保存」生效", faint=True)
+        return "break"                        # 别让字符落进输入框
+
+    def save_hotkey(self) -> None:
+        """检测冲突 → 保存 → 提示面板多久生效。"""
+        from . import hotkey as hotkey_mod
+        from .client_config import ClientConfig
+
+        text = (self.hotkey_var.get() or "").strip()
+        enabled = bool(self.hotkey_enabled_var.get())
+        config = self.controller.config
+
+        if not enabled:
+            config.hotkey_enabled = False
+            self.controller.save()
+            self._set_hotkey_hint("已关闭热键（日程表面板会在 1 秒内释放这个组合）")
+            return
+
+        # 保存的就是当前正用的组合时不算冲突：那是我们自己的
+        current = (getattr(config, "hotkey", "") or "").strip()
+        if hotkey_mod.describe(text) and hotkey_mod.describe(text) == hotkey_mod.describe(current) \
+                and getattr(config, "hotkey_enabled", False):
+            config.hotkey = hotkey_mod.describe(text)
+            self.controller.save()
+            self._set_hotkey_hint(f"已保存：{config.hotkey}（日程表面板正在使用这个组合）")
+            return
+
+        ok, message = hotkey_mod.check(text)
+        if not ok:
+            self._set_hotkey_hint(message, error=True)
+            return
+        config.hotkey = hotkey_mod.describe(text)
+        config.hotkey_enabled = True
+        self.controller.save()
+        self._set_hotkey_hint(f"已保存：{config.hotkey}。日程表面板会在 1 秒内启用它。")
 
     # -- 教程入口 -------------------------------------------------------
     def open_tutorial(self) -> None:
@@ -1780,6 +2135,9 @@ class ControlWindow:
         # 关闭窗口的行为固定是"最小化至托盘"，不再从界面写 close_action
         config.close_action = "tray"
         config.desktop_only = bool(self.desktop_only_var.get())
+        # 主题保持界面上选的那一项（这块是即时生效的，进这里只是防止被别处覆盖）
+        if hasattr(self, "theme_mode_var"):
+            config.theme_mode = self.theme_mode_var.get()
         self.controller.save()
         self.refresh_header()
         restart = messagebox.askyesno(

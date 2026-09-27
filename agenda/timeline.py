@@ -292,6 +292,7 @@ def build_timeline(
     days: int = 7,
     last_run_text: str | None = None,
     calendar: Calendar | None = None,
+    hide_past_events: bool = False,
 ) -> Timeline:
     anchor = today or Date.today()
     current = now or datetime.now()
@@ -336,7 +337,13 @@ def build_timeline(
         day = parse_day(event.date)
         if day is None or day < anchor or day >= anchor + timedelta(days=days):
             continue
-        by_date.setdefault(event.date, []).append(_event_card(event, anchor, current))
+        card = _event_card(event, anchor, current)
+        # 已经结束的通知不再占版面（用户要求「过期日程自动消失」）。
+        # **只对通知生效，不动课程**：课时表是当天的骨架，上午的课下午还要回看，
+        # 清掉它整天的结构就散了。
+        if hide_past_events and card.state == "past":
+            continue
+        by_date.setdefault(event.date, []).append(card)
         event_counts[event.date] = event_counts.get(event.date, 0) + 1
 
     sections: list[DaySection] = []

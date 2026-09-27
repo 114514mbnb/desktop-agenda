@@ -121,6 +121,70 @@ class FestivalTriggerTests(unittest.TestCase):
         self.assertEqual(festival_for(Date(2026, 9, 29)).key, "national")
         self.assertEqual(festival_for(Date(2026, 9, 27)).key, "midautumn")
 
+    # -- 合并假期区间（"中秋国庆连放"）------------------------------------
+    def _merged(self):
+        """用户真实配置：一条区间把中秋和国庆并在一起。"""
+        return Calendar(holidays=[Holiday("中秋国庆连放", Date(2026, 9, 25), Date(2026, 10, 7))])
+
+    def test_merged_range_splits_between_its_festivals(self):
+        """合并区间要**按各节日自己的天数分段**，不能第一个节日吃掉整段。
+
+        用户反馈：「今天都已经中秋第四天了，中秋节的彩蛋是不是应该取消了，
+        应该恢复原样了吧？」——旧行为下 9/28 还在放中秋，甚至国庆假期里的 10/5
+        显示的是"中秋 已过 10 天"，国庆自己的假期反而没有国庆。
+        """
+        calendar = self._merged()
+        self.assertEqual(festival_for(Date(2026, 9, 25), calendar).key, "midautumn")
+        self.assertEqual(festival_for(Date(2026, 10, 1), calendar).key, "national")
+        self.assertEqual(festival_for(Date(2026, 10, 7), calendar).key, "national")
+
+    def test_merged_range_leaves_the_gap_days_plain(self):
+        """中秋和国庆之间那几天不属于任何节日 → 恢复原样，一点彩蛋都不留。"""
+        calendar = self._merged()
+        for day in (Date(2026, 9, 26), Date(2026, 9, 27), Date(2026, 9, 28),
+                    Date(2026, 9, 29), Date(2026, 9, 30)):
+            with self.subTest(day=day):
+                self.assertIsNone(festival_for(day, calendar),
+                                  f"{day} 不该再有彩蛋（用户要求中秋过了就恢复原样）")
+                self.assertIsNone(hint_for(day, calendar))
+
+    def test_merged_range_still_announces_before_it_starts(self):
+        """区间**之前**的日子照旧提前预告（9/22–9/24「还有 N 天」）。"""
+        calendar = self._merged()
+        for offset, text in ((-3, "还有 3 天"), (-2, "还有 2 天"), (-1, "还有 1 天")):
+            day = Date(2026, 9, 25) + timedelta(days=offset)
+            with self.subTest(day=day):
+                hint = hint_for(day, calendar)
+                self.assertIsNotNone(hint)
+                self.assertEqual(hint.festival.key, "midautumn")
+                self.assertEqual(hint.timing_text(), text)
+
+    def test_merged_range_keeps_the_wrap_up_after_it_ends(self):
+        """区间结束后仍走收心倒计时。"""
+        calendar = self._merged()
+        hint = hint_for(Date(2026, 10, 9), calendar)
+        self.assertIsNotNone(hint)
+        self.assertEqual(hint.festival.key, "national")
+        self.assertTrue(hint.timing_text().startswith("收心倒计时"))
+
+    def test_single_festival_holiday_still_covers_the_whole_range(self):
+        """只对得上一个节日的假期，整段仍然是它的气氛（原行为不能丢）。"""
+        calendar = Calendar(holidays=[Holiday("国庆节", Date(2026, 10, 1), Date(2026, 10, 7))])
+        for day in (Date(2026, 10, 3), Date(2026, 10, 6), Date(2026, 10, 7)):
+            with self.subTest(day=day):
+                self.assertEqual(festival_for(day, calendar).key, "national")
+        # 春节一路到元宵那种长假同理
+        spring = Calendar(holidays=[Holiday("春节", Date(2027, 2, 6), Date(2027, 2, 12))])
+        self.assertEqual(festival_for(Date(2027, 2, 11), spring).key, "spring")
+
+    def test_several_spans_are_read_from_the_festival_itself(self):
+        """各节日占几天取自它自己的 `suggested_span`，不是写死的窗口。"""
+        calendar = self._merged()
+        midautumn = festival_for(Date(2026, 9, 25), calendar)
+        national = festival_for(Date(2026, 10, 1), calendar)
+        self.assertEqual(midautumn.suggested_span, (0, 0), "中秋应当只有一天")
+        self.assertEqual(national.suggested_span, (0, 6), "国庆应当是七天")
+
     def test_holiday_too_far_from_the_festival_does_not_trigger_it(self):
         """假期名叫"国庆节"但排在三月 —— 不许因为这个假名放出国庆彩蛋。"""
         calendar = Calendar(holidays=[Holiday("国庆节", Date(2026, 3, 1), Date(2026, 3, 3))])

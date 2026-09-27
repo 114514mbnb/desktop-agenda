@@ -120,18 +120,24 @@ class SettingsPageTests(unittest.TestCase):
         # 「智能隐身」必须还在（它是待机模式的名字），但后面不许跟"（原方案）"
         self.assertTrue(any("智能隐身" in text for text in texts), "待机模式不见了")
 
-    def test_only_two_checkboxes_and_two_radios_remain(self):
-        """复选框只剩 2 个（启动显示 / 到点弹窗），单选只剩待机模式那 2 个。"""
+    def test_only_the_intended_controls_remain(self):
+        """复选框只剩 3 个（启动显示 / 到点弹窗 / 热键启用），单选只剩待机模式那 2 个。
+
+        这里按**标签**逐个点名，而不是只数个数：数量对得上但塞进一个别的开关，
+        这种退化必须能被测出来。
+        """
         import tkinter as tk
 
         frame = self._settings_frame()
         checks = [w for w in _walk(frame) if isinstance(w, tk.Checkbutton)]
         radios = [w for w in _walk(frame) if isinstance(w, tk.Radiobutton)]
-        self.assertEqual(len(checks), 2,
-                         f"复选框应该只剩 2 个，实际 {[w.cget('text') for w in checks]}")
-        self.assertEqual(len(radios), 2,
-                         f"待机模式应该正好 2 个选项，实际 {[w.cget('text') for w in radios]}")
-        self.assertEqual([w.cget("text") for w in radios], ["智能隐身", "常驻待机"])
+        self.assertEqual([w.cget("text") for w in checks],
+                         ["启动时显示桌面面板", "到点弹窗提醒", "启用",
+                          "按热键时优先识别「选中的文字」"],
+                         f"复选框不对：{[w.cget('text') for w in checks]}")
+        # 单选：待机模式二选一 + 主题三选一
+        self.assertEqual([w.cget("text") for w in radios],
+                         ["智能隐身", "常驻待机", "经典深色", "随时刻", "我的照片"])
 
     def test_power_settings_keep_their_config_values(self):
         """保存设置不许把界面上已经删掉的字段写坏。

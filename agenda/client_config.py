@@ -62,6 +62,17 @@ class ClientConfig:
     remind_before_minutes: int = 10
     #: 已提醒过的事项 id（避免重复弹）
     reminded: list[str] = field(default_factory=list)
+    #: 剪贴板全局热键：按一下就把剪贴板里的群通知解析入库（登记在日程表面板进程上）
+    hotkey_enabled: bool = True
+    #: 热键写法（规范化形态，例如 Ctrl+Alt+Q）。改完面板会自己重挂，不必重启。
+    hotkey: str = "Ctrl+Alt+Q"
+    #: 面板主题：classic=经典深色 / auto=随时刻（清晨·白天·黄昏·深夜）/ photo=我的照片
+    theme_mode: str = "classic"
+    #: 照片模式用的背景图文件名（存在 data/theme/ 下；空串表示还没选照片）
+    theme_photo: str = ""
+    #: 按热键时是否先尝试抓取前台程序里选中的文字（借用剪贴板：合成一次 Ctrl+C）+
+    #: 关掉它 = 只读剪贴板里已经有的内容（终端用户或不喜欢模拟按键的人可以关）
+    hotkey_selection: bool = True
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, indent=2)

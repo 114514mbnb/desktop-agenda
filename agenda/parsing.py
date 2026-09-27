@@ -89,6 +89,18 @@ DATE_LOOSE_RE = re.compile(r"\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2}")
 DATE_CN_RE = re.compile(r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日?")
 DATE_COMPACT_RE = re.compile(r"(?<!\d)(20\d{2})(\d{2})(\d{2})(?!\d)")
 
+#: 日期区间的分隔符。**变体必须都收**：用户原文用的是 U+2011（非断行连字符），
+#: 只认 ASCII `-` 的话"9月25日‑28日"整个区间都识别不出来。
+RANGE_SEP = r"(?:--|[-‑–—－~～至到])"
+#: 日期区间：`9月25日-28日`、`9月25日至9月28日`、`9月25日～28日`、`9月25日—28日`。
+DATE_RANGE_RE = re.compile(
+    rf"(?P<a>(?:\d{{4}}\s*年\s*)?\d{{1,2}}\s*月\s*\d{{1,2}}\s*[日号]?)"
+    rf"\s*{RANGE_SEP}\s*"
+    rf"(?P<b>(?:\d{{4}}\s*年\s*)?(?:\d{{1,2}}\s*月\s*)?\d{{1,2}}\s*[日号]?)"
+)
+#: 区间后面常跟「期间/之间/内」，一并认掉（标题里不该残留"期间"）
+RANGE_TAIL_RE = re.compile(r"^\s*(?:期间|之间|之内|内|前)\s*")
+
 
 @dataclass
 class DateParse:
@@ -271,6 +283,50 @@ def _find_day_part(text: str) -> tuple[str | None, int | None]:
         if index >= 0:
             return key, DAY_PARTS[key][2]
     return None, None
+
+
+def parse_date_range(text: str, notice_date: Date | None = None) -> tuple[Date, Date, str] | None:
+    """识别"9月25日-28日"这类**日期区间**，返回 (起, 止, 命中的原文)。
+
+    为什么需要它：班级群里极常见的写法是"X月X日-X日期间，每日11:00前…"。
+    只认单个日期的话，这种通知要么被丢掉、要么只落在第一天，
+    而用户真正需要的是**区间内每一天**都提醒（见 `extract` 里的"每日"展开）。
+
+    右半边可以省略月份（`9月25日-28日` → 用左半边的月份），也能跨月（`9月28日-10月2日`）。
+    右半边早于左半边时按"跨月"处理（`12月28日-2日` → 次年？不猜年份，只把月份 +1）。
+    """
+    match = DATE_RANGE_RE.search(text or "")
+    if match is None:
+        return None
+    base = notice_date or Date.today()
+    left = parse_date(match.group("a"), base)
+    if left is None or left.date is None:
+        return None
+    start = Date.fromisoformat(left.date)
+
+    right_text = match.group("b")
+    # 右半边没写月份时补上左半边的月份，否则 parse_date 会把它当成"日"而认不出来
+    if not re.search(r"\d{1,2}\s*月", right_text):
+        digits = re.findall(r"\d{1,2}", right_text)
+        if not digits:
+            return None
+        right_text = f"{start.month}月{digits[-1]}日"
+    right = parse_date(right_text, base)
+    if right is None or right.date is None:
+        return None
+    end = Date.fromisoformat(right.date)
+    if end < start:
+        # 跨月：右半边补一个月（12月28日-2日 → 1月2日）
+        month = end.month + 1
+        year = end.year + (1 if month > 12 else 0)
+        month = 1 if month > 12 else month
+        try:
+            end = Date(year, month, end.day)
+        except ValueError:
+            return None
+    if end < start:
+        return None
+    return start, end, match.group(0)
 
 
 def parse_time(text: str) -> TimeParse:

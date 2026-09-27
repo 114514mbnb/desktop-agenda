@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import replace
 from datetime import date as Date, datetime
 
 from . import parsing as P
@@ -44,6 +45,19 @@ CHATTER_HINTS = (
     "哈哈", "笑死", "表情", "沙发", "水群", "有人吗", "在吗", "晚安", "早安",
     "收到", "好的", "谢谢", "感谢", "恭喜", "打卡", "红包", "投票", "砍价",
 )
+
+#: 任务动词：出现这些词说明这是"要你做事"的消息，哪怕带了「感谢/收到」也不该当闲聊丢掉。
+TASK_VERBS = (
+    "统计", "报送", "上报", "报备", "备案", "登记", "填写", "填表", "汇总", "核对",
+    "确认", "收集", "收齐", "整理", "准备", "携带", "提交", "上交", "截止", "完成",
+    "领取", "发放", "办理", "报名", "查收", "回复", "按时", "务必", "请各",
+)
+
+#: 出现这些词说明是"每天都在做"的周期性事项，配合日期区间逐日展开。
+DAILY_WORDS = ("每日", "每天", "天天", "每夜", "每晚")
+
+#: 区间展开的护栏：超过这个天数就不再逐日展开（避免把"整个学期"炸成一百条）。
+MAX_DAILY_DAYS = 14
 
 LOCATION_KEYWORDS = (
     "会议室", "教室", "报告厅", "礼堂", "体育馆", "操场", "实验室", "办公室",
@@ -184,6 +198,7 @@ def _taken_spans(
     location: str | None,
     people: tuple[str, ...],
     notes: list[str],
+    range_text: str | None = None,
 ) -> list[tuple[int, int]]:
     """收集"已经单独成字段"的片段在标题行里的位置。"""
     spans: list[tuple[int, int]] = []
@@ -198,6 +213,12 @@ def _taken_spans(
                     end += tail.end()
             spans.append((match.start(), end))
 
+    # 日期区间（"9月25日-28日"）要整段删掉，连后面的「期间」一起，
+    # 否则标题里会残留"-28日期间"这种碎片。
+    range_cleaned = (range_text or "").strip()
+    if range_cleaned:
+        for match in re.finditer(re.escape(range_cleaned) + r"\s*(?:期间|之间|之内|内)?", line):
+            spans.append((match.start(), match.end()))
     # 注意：解析出的片段可能带首尾空格（正则里的 \s*），必须 strip 后再定位
     for text in (date_text, time_text):
         cleaned = (text or "").strip()
@@ -366,9 +387,13 @@ NOTE_KEYWORDS = (
     "记得", "注意事", "携带", "自带", "准备", "穿着", "着装", "材料", "截止",
 )
 NOTE_START_RE = re.compile(
-    r"(?:备\s*注|说\s*明|注\s*意(?:事项)?|提\s*醒|要\s*求|请\s*注\s*意|务必|记得|"
+    r"(?:备\s*注|说\s*明|提\s*醒|要\s*求|请\s*注\s*意|务必|记得|"
     r"需\s*要|需\s*携\s*带|携\s*带|自\s*带|准\s*备)\s*[:：]?\s*"
 )
+#: 「注意」单独出现在**句首**时是提醒口吻（"注意，9月28日…每日前统计…"），
+#: 整句抓成备注会把真正的标题吃掉——所以它只在句中才算备注标记。
+#: （"注意事项：带笔记本"这种仍然算，见上面的 NOTE_START_RE。）
+NOTE_MID_RE = re.compile(r"(?:注\s*意(?:事项)?)\s*[:：]\s*")
 
 TITLE_PREFIX_RE = re.compile(r"^\s*(?:通知|公告|提醒|重要通知|紧急通知|关于)\s*[:：]?\s*")
 TITLE_SUFFIX_RE = re.compile(r"\s*(?:通知|公告|安排|事宜)\s*$")
@@ -415,6 +440,45 @@ ROOM_TAIL_RE = re.compile(
     r"(?:召开|举行|举办|召开|开|有|见|集合|签到|门口|见|内|里)"
 )
 LOCATION_KEYWORDS = LOCATION_KEYWORDS + ("学术报告厅",)
+
+#: 呼语（点名的对象）：标题里出现这些是"这句话在跟谁说话"，不是事项本身。
+#: 例：「请各班临时负责人，9月25日…」里真正的事项是"统计留校人员名单"。
+VOCATIVE_RE = re.compile(
+    r"^(?:请|烦请|辛苦|麻烦|望|希望)?\s*(?:各|各班|各位|全体|所有)?\s*"
+    r"[\u4e00-\u9fa5A-Za-z0-9]{0,10}?"
+    r"(?:负责人|联系人|同学|同学们|班长|班委|组长|干事|老师|大家|全体|各位)"
+    r"[\u4e00-\u9fa5]{0,4}\s*[，,、:：]?\s*"
+)
+#: 被上述规则剥掉名词后剩下的"呼语残渣"（"请各班临时 每日统计…"）。
+#: ⚠ 后面的汉字上限只能给 **4** 个字：给到 8 的话，"注意 每日统计名单 感谢配合"
+#: 会把"每日统计名单"整段当成残渣吃掉，标题就空了（实测踩到，退化成「（无标题事项）」）。
+VOCATIVE_REMNANT_RE = re.compile(
+    r"^(?:请|烦请|辛苦|麻烦|望|希望|注意|提示|提醒|各位|各班)"
+    r"\s*[\u4e00-\u9fa5A-Za-z0-9]{0,4}\s*[\s，,、:：]+"
+)
+#: 结尾的客套话：「…并报送至本群。辛苦各位按时完成，感谢配合。」
+COURTESY_TAIL_RE = re.compile(
+    r"(?:[。；;，,\s]*(?:辛苦|感谢|谢谢|多谢|拜托|劳烦)[^。；;！!？?]{0,20})+\s*[。！!]?\s*$"
+)
+
+
+def _tidy_title(value: str, *, daily: bool = False) -> str:
+    """标题的最后一道清理：去掉呼语、周期词与结尾客套话。
+
+    这一段是照着**真实班级通知**的形状加的：
+    「请各班临时负责人，9月25日‑28日期间，每日上午11:00前统计本班当日留校人员名单，
+      并报送至本群。辛苦各位按时完成，感谢配合。」
+    字段抽完之后剩下的标题里，会同时残留三种垃圾：呼语（"请各班临时负责人"）、
+    周期词（"每日"，它已经体现在逐日展开上了）、客套话（"辛苦…感谢配合"）。
+    """
+    text = value.strip()
+    text = VOCATIVE_RE.sub("", text)
+    text = VOCATIVE_REMNANT_RE.sub("", text)
+    if daily:
+        text = re.sub(r"(?:每|逐)(?:日|天|晚|夜)", " ", text)
+    text = COURTESY_TAIL_RE.sub("", text)
+    text = re.sub(r"\s{2,}", " ", text)
+    return text.strip(" \t-—:：,，。;；、|")
 
 
 def _clean_title(text: str) -> str:
@@ -628,6 +692,11 @@ def _find_notes(lines: list[str]) -> tuple[str, ...]:
     collected: list[str] = []
     for line in lines:
         match = NOTE_START_RE.search(line)
+        if match is None:
+            # 句中的「注意：」才算备注标记；句首的「注意，…」是提醒口吻，见 NOTE_MID_RE
+            mid = NOTE_MID_RE.search(line)
+            if mid is not None and mid.start() > 0:
+                match = mid
         if match is not None:
             note = line[match.start():].strip()
             note = re.sub(r"\s{2,}", " ", note)
@@ -639,11 +708,25 @@ def _find_notes(lines: list[str]) -> tuple[str, ...]:
 def _is_schedulable(text: str) -> bool:
     if any(keyword in text for keyword in EVENT_KEYWORDS):
         return True
-    return False
+    # 任务动词也算"有事要做"：班级通知里大量是"统计/报送/填写/汇总"这类说法，
+    # 一个活动词都没有（"请各班统计留校名单"），以前会被当成闲聊丢掉。
+    return any(verb in text for verb in TASK_VERBS)
 
 
 def _looks_like_chatter(text: str) -> bool:
+    """是不是"水群消息"（该被丢掉的那种）。
+
+    判据必须**保守**——宁可留下一条噪音，也别把正经通知丢掉。
+    真踩过：原来的规则是"出现 CHATTER_HINTS 里任一词、且没有活动词"就当闲聊，
+    而 CHATTER_HINTS 里有「感谢」「收到」「好的」，可学生群的通知**几乎都以「…感谢配合。」结尾**，
+    于是整条通知被静默丢弃（用户原话："为什么这种格式的通知无法被录入"）。
+    现在只要出现**任务动词**或**日期/钟点**，就不当闲聊。
+    """
     if any(keyword in text for keyword in EVENT_KEYWORDS):
+        return False
+    if any(verb in text for verb in TASK_VERBS):
+        return False
+    if P.has_explicit_clock(text) or P.DATE_WORD_RE.search(text) is not None:
         return False
     return any(hint in text for hint in CHATTER_HINTS)
 
@@ -699,6 +782,12 @@ def extract_candidates(message: NoticeMessage) -> list[Candidate]:
         start, end = time_parse.start, time_parse.end
         part_only = start is not None and not has_clock
 
+        # 「9月25日-28日期间，每日…」：区间 + 每日 → 逐日展开成多条日程。
+        # 这是班级群里最常见的写法之一，只记第一天的话用户会漏掉后面几天。
+        daily_span = P.parse_date_range(joined, message.shift_date or Date.today())
+        range_text = daily_span[2] if daily_span else None
+        daily = any(word in joined for word in DAILY_WORDS)
+
         location = _find_location(lines)
         people = _find_people(lines)
         notes = list(_find_notes(lines))
@@ -711,32 +800,40 @@ def extract_candidates(message: NoticeMessage) -> list[Candidate]:
             if not _is_structural_line(line):
                 title_line = fallback_line = line
                 break
-        taken = _taken_spans(
-            title_line,
-            date_parse.matched if date_parse else None,
-            time_parse.matched,
-            location,
-            people,
-            notes,
-        )
-        title = _compose_title(title_line, taken)
+        daily_flag = bool(daily_span and daily)
+
+        def _title_from(line: str) -> str:
+            """从某一行取标题：抽掉已成字段的片段 → 清洗 → 去呼语/周期词/客套话。
+
+            ⚠ 顺序很关键：`_tidy_title` 必须在**判断"标题是否为空"之前**做。
+            否则「注意，…每日…统计名单，感谢配合。」这种句子，清洗前看着有内容、
+            清理后可能只剩两个空格，于是被误判成"没标题"，退化成「（无标题事项）」。
+            """
+            spans = _taken_spans(
+                line,
+                date_parse.matched if date_parse else None,
+                time_parse.matched,
+                location,
+                people,
+                notes,
+                range_text=range_text,
+            )
+            return _tidy_title(_compose_title(line, spans), daily=daily_flag)
+
+        title = _title_from(title_line)
         if len(title) < 2:
             # 这一行整句都在描述别的字段（例如只有一行「【提醒】」，标签被剥掉就空了）：
             # 往后找第一条真正有内容的行再来一次，别拿半截状语或空标签当标题。
+            title = ""
             for line in content_lines[1:]:
                 if line is title_line:
                     continue
-                taken = _taken_spans(
-                    line,
-                    date_parse.matched if date_parse else None,
-                    time_parse.matched, location, people, notes,
-                )
-                candidate = _compose_title(line, taken)
+                candidate = _title_from(line)
                 if len(candidate) >= 2:
                     title = candidate
                     break
-            else:
-                title = _fallback_title(fallback_line)
+            if not title:
+                title = _tidy_title(_fallback_title(fallback_line), daily=daily_flag)
         if len(title) > 60:
             title = title[:57] + "…"
 
@@ -780,6 +877,30 @@ def extract_candidates(message: NoticeMessage) -> list[Candidate]:
             date_source=date_source,
             confidence=round(max(0.2, min(1.0, confidence)), 2),
         ))
+
+        # 区间 + 「每日」：**只记一条，落在区间的最后一天**。
+        #
+        # 为什么不按天摊开：用户原话「没有必要把后面空闲的时间都连带调出，
+        # 直接把任务结束的那天就行了」。"9月25日-28日每日统计并报送"是一条**有截止日
+        # 的临时任务**，不是 4 件互不相干的事；摊开会把区间里本来空闲的日子全填上
+        # 同名卡片，7 天视图一眼看过去全是重复行。
+        # 区间和"每日"都写进备注，信息一点不丢。
+        if daily_span is not None and daily:
+            span_start, span_end, _matched = daily_span
+            days = (span_end - span_start).days + 1
+            if 2 <= days <= MAX_DAILY_DAYS:
+                base_candidate = candidates.pop()
+                span_note = (
+                    f"连续事项：{span_start.strftime('%m月%d日')}–{span_end.strftime('%m月%d日')} 每日"
+                    f"（{span_end.strftime('%m月%d日')} 截止）"
+                )
+                candidate_notes = list(filter(None, [base_candidate.notes, span_note]))
+                candidates.append(replace(
+                    base_candidate,
+                    date=span_end.strftime("%Y-%m-%d"),
+                    notes="；".join(dict.fromkeys(candidate_notes)),
+                ))
+                continue
 
     return candidates
 

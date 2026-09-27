@@ -41,6 +41,23 @@ FONT_CANDIDATES = (
 )
 
 
+def apply_palette(palette: dict) -> None:
+    """**就地**替换配色（不重新绑定 COLORS 这个名字）。
+
+    为什么是就地更新而不是 `COLORS = palette`：全项目有 300 多处
+    `theme.COLORS["x"]` 的读取点，其中不少在函数默认参数或模块级常量里提前取过值；
+    重新绑定会让"旧引用"和"新引用"指向两个字典，出现一半新一半旧的鬼界面。
+    `dict.update` 保证所有引用看到的是同一份数据。
+
+    传入的调色板必须带齐全部键——少一个键就会在某个控件构建时 KeyError
+    （`tests/test_theme_modes.py` 钉住了这条）。
+    """
+    missing = set(COLORS) - set(palette)
+    if missing:
+        raise ValueError(f"调色板缺少这些键：{sorted(missing)}")
+    COLORS.update(palette)
+
+
 @dataclass(frozen=True)
 class Fonts:
     family: str
@@ -98,11 +115,58 @@ def mix(color_a: str, color_b: str, ratio: float) -> str:
 
 
 def tint(base: str, accent: str, ratio: float = 0.22, dim: float = 0.5) -> str:
-    """在深色底上叠一点强调色，得到"淡彩卡片"底色。dim<1 时整体压暗。"""
+    """在底色上叠一点强调色，得到"淡彩卡片"底色；`dim` 控制整体压暗/提亮的强度。
+
+    ⚠ 方向必须跟着底色走：`dim<1` 时**深色底要压暗、浅色底要提亮**。
+    原来这里写死了 `mix("#000000", value, dim)`（一律压暗），在浅色主题上直接把
+    白卡片压成中灰，配上浅色主题的深色字就是"深底深字"——实拍截图里几乎看不清
+    （`白天` 主题的卡片就是这个下场）。现在按底色亮度选锚点。
+    """
     value = mix(base, accent, ratio)
     if dim < 1.0:
-        value = mix("#000000", value, dim)
+        anchor = "#000000" if _is_dark(base) else "#FFFFFF"
+        value = mix(anchor, value, dim)
     return value
+
+
+def _is_dark(color: str) -> bool:
+    """这个颜色算深色还是浅色（用感知亮度，不用简单平均）。"""
+    def channel(value: int) -> float:
+        srgb = value / 255
+        return srgb / 12.92 if srgb <= 0.03928 else ((srgb + 0.055) / 1.055) ** 2.4
+
+    raw = color.lstrip("#")
+    r, g, b = int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16)
+    luminance = 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+    return luminance < 0.45
+
+
+def readable_accent(color: str, background: str, *, min_ratio: float = 3.0) -> str:
+    """把一个"语义色"调整到当前底色上看得清（保持色相，只改明度）。
+
+    为什么需要它：节日金 `#FFD166`、假期橙 `#F2994A`、进行中绿 `#37C978` 这些颜色
+    都是按**深色底**挑的。放到浅色主题（清晨/白天）的底上，对比度只剩 1.2:1——
+    实测截图里那行日期几乎看不见。与其给 8 个节日 × 4 套配色手工配 32 个颜色，
+    不如统一按"混到对比度达标为止"来算，顺手也保护了以后新加的语义色。
+
+    返回一个尽量贴近原色的颜色：先小步往黑/往白混，哪一步达标就返回。
+    """
+    if not (color.startswith("#") and background.startswith("#")):
+        return color
+    from . import backdrop       # 延迟导入：避免 theme ←→ backdrop 的循环依赖
+
+    if backdrop.contrast_ratio(color, background) >= min_ratio:
+        return color
+    best, best_ratio = color, backdrop.contrast_ratio(color, background)
+    for step in range(1, 10):
+        for anchor in ("#000000", "#FFFFFF"):
+            candidate = mix(color, anchor, step / 10)
+            ratio = backdrop.contrast_ratio(candidate, background)
+            if ratio > best_ratio:
+                best, best_ratio = candidate, ratio
+            if ratio >= min_ratio:
+                return candidate
+    return best
 
 
 def pick_font_family(root) -> str:

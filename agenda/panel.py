@@ -11,11 +11,19 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import re
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import font as tkfont
+#: `messagebox` / `ttk` 曾经漏了导入：`ask_end_time` 里用 `ttk.Combobox`、
+#: `card_delete` 里用 `messagebox.askyesno`，两处都是**运行时才炸**的 NameError——
+#: 菜单点下去什么都不发生（异常被 Tk 吞进 stderr，面板继续跑）。
+#: 静态检查（用 AST 找"用了但没导入的名字"）现在会盯着这类问题。
+from tkinter import messagebox, ttk
 
 from . import theme
+from .date_entry import DateEntry
 from .festival import Festival, hint_for
 from .festival_banner import FestivalBanner, mix_color as _mix_color
 from .holidays import load_calendar
@@ -36,6 +44,10 @@ DESKTOP_POLL_MS = 5000        # 兜底巡检间隔（正常靠下面的快速轮
 # 两个探测加起来 0.002 ms/次，40 ms 一次的开销可以忽略；40 ms 是为了让"切回主屏幕"
 # 时面板回到屏幕上的延迟低到看不出来（100 ms 那版实测平均 102 ms，能感觉出来）。
 FOREGROUND_POLL_MS = 40       # 前台状态快查间隔：决定"回到屏幕"的响应速度
+#: 原生回调（窗口过程）攒下的待办，由这个间隔的 Tk 定时器统一执行。
+#: 为什么必须绕这一道：见 `AgendaPanel._native_tick` 的注释——在窗口过程里直接调 Tk
+#: 会让进程硬崩（实测：按一下剪贴板热键，面板进程当场消失，无异常、panel.log 为空）。
+NATIVE_TICK_MS = 60
 REFRESH_MS = 30_000           # 界面刷新（倒计时/进度）
 PIPELINE_MS = 15 * 60_000     # 自动整合 inbox
 #: 底部提示行平时是**空的**：用户要求把那串操作说明删掉，改成右下角一个小齿轮按钮
@@ -69,11 +81,12 @@ def ask_end_time(parent, title: str, start: str | None, current: str) -> str | N
     window = tk.Toplevel(parent)
     window.title("修改结束时间")
     window.configure(bg=theme.COLORS["bg"])
+    # 先藏起来：布局尺寸和位置都算好了再显示，用户不会看到窗口先闪到左上角再跳过来。
+    window.withdraw()
     try:
         window.transient(parent)
     except tk.TclError:
         pass
-    window.grab_set()
     window.resizable(False, False)
 
     tk.Label(
@@ -114,22 +127,262 @@ def ask_end_time(parent, title: str, start: str | None, current: str) -> str | N
               bg=theme.COLORS["card"], fg=theme.COLORS["text"], padx=16, pady=6, cursor="hand2",
               font=("Microsoft YaHei UI", 9)).pack(side="right", padx=(0, 8))
     window.bind("<Escape>", lambda _e: window.destroy())
+    # 顺序很关键，三条都真踩过：
+    #   1) 布局之前就 `focus_force()` → Tk 按默认尺寸把窗口映射出来，
+    #      用户看到一个停在左上角、200x200 的空框；
+    #   2) 只设位置不设尺寸 → 映射阶段 Tk 自己重排，对话框又掉回 +0+0；
+    #   3) 面板平时沉在桌面层（不是置顶窗口）→ 它弹的对话框一起被别的窗口盖住，
+    #      用户点了「修改结束时间…」只看到"什么都没发生"。
+    # 所以：先让控件布局出尺寸 → 显式写全 WxH+X+Y → 再显示、置顶、抬到最前、抢焦点。
     _center_over(window, parent)
+    try:
+        window.attributes("-topmost", True)
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+    except tk.TclError:
+        try:
+            window.deiconify()
+        except tk.TclError:
+            pass
+    window.grab_set()
     parent.wait_window(window)
     return result["value"]
 
 
+#: `HH:MM`（00:00–23:59）。编辑通知时人手输入，必须挡在前面。
+_TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
+#: 全屏判定的宽限期：前台窗口覆盖全屏后要**持续**这么久，才认定是"真·全屏应用"。
+#: 为什么需要：截图工具（Win+Shift+S / QQ 截图 / Snipaste）的遮罩就是"覆盖全屏、
+#: 位于 (0,0)"的窗口，一次误判就把面板挪到屏幕外 —— 用户正在看的东西（包括面板自己
+#: 弹的窗）跟着从视野里消失。他截图给我看 bug 时正好踩到这一点。
+FULLSCREEN_GRACE_MS = 1500
+
+#: 双击判定窗口。卡片上单击=选中/取消选中、双击=看全文，而双击的**第二拍**
+#: 也会被 Tk 当成一次单击发过来——不加保护的话，双击之后卡片反而变成"未选中"。
+DOUBLE_CLICK_GUARD = 0.4
+
+
+def _descendants(widget) -> list:
+    """`widget` 自己 + 它所有子孙控件（按创建顺序）。
+
+    为什么需要：卡片的可点区域要覆盖**整张卡**。以前只绑了标题那一行和色条，
+    用户点"备注那几行字"就没反应，他也确实抱怨了「取消选中的区域太小」。
+    """
+    found = [widget]
+    for child in widget.winfo_children():
+        found.extend(_descendants(child))
+    return found
+
+
+def merge_notes(existing: str | None, addition: str) -> str:
+    """把一段补充内容并进原来的备注。
+
+    短句用「；」并成一行（卡片上更像"备注"而不是一段散文）；
+    多行或很长的那就以换行另起一段，免得挤成一坨看不清。原文一个字都不改。
+    """
+    addition = (addition or "").strip()
+    existing = (existing or "").strip()
+    if not existing:
+        return addition
+    if not addition:
+        return existing
+    if "\n" in addition or len(addition) > 60:
+        return f"{existing}\n{addition}"
+    return f"{existing}；{addition}"
+
+
+def ask_edit_event(parent, *, title: str = "", date: str = "", start: str = "",
+                   end: str = "", location: str = "", people: str = "",
+                   notes: str = "") -> dict[str, str] | None:
+    """《编辑此条通知》对话框：手动微调识别出来的内容。返回改好的字段，取消返回 None。
+
+    为什么需要它：群通知的写法千奇百怪——呼语、周期词、区间、跟着追发的补充消息……
+    解析器再全也有认不准的时候。以前用户只能"删掉重新录一遍"，现在直接改。
+
+    字段：标题 / 日期 / 开始 / 结束 / 地点 / 人员 / 备注。
+    日期用的是 `DateEntry`（月日各一个框、短横线是标签删不掉），
+    和程序里其它改日期的地方保持一致——用户明确要求过"短横线不可删除"。
+    校验失败**不关窗**，在下面用红字说明，用户改完再点保存。
+    """
+    result: dict[str, str] | None = None
+    window = tk.Toplevel(parent)
+    window.title("编辑此条通知")
+    window.configure(bg=theme.COLORS["bg"])
+    window.withdraw()                      # 布局摆好再显示，免得先闪到左上角
+    try:
+        window.transient(parent)
+    except tk.TclError:
+        pass
+    window.resizable(False, False)
+
+    colors = theme.COLORS
+    body = tk.Frame(window, bg=colors["bg"])
+    body.pack(fill="both", expand=True, padx=16, pady=(14, 6))
+    body.columnconfigure(1, weight=1)
+    row_index = 0
+
+    def add_row(label: str):
+        nonlocal row_index
+        tk.Label(body, text=label, bg=colors["bg"], fg=colors["text_dim"],
+                 font=("Microsoft YaHei UI", 9), anchor="w").grid(
+            row=row_index, column=0, sticky="w", pady=(0, 6), padx=(0, 10))
+        holder = tk.Frame(body, bg=colors["bg"])
+        holder.grid(row=row_index, column=1, sticky="ew", pady=(0, 6))
+        row_index += 1
+        return holder
+
+    def make_entry(holder, value: str, width: int):
+        entry = tk.Entry(holder, bg=colors["card"], fg=colors["text"], relief="flat",
+                         insertbackground=colors["text"], font=("Microsoft YaHei UI", 9),
+                         width=width)
+        entry.insert(0, value or "")
+        entry.pack(side="left", ipady=3, ipadx=4, fill="x", expand=True)
+        return entry
+
+    def make_time_entry(holder, value: str):
+        entry = tk.Entry(holder, bg=colors["card"], fg=colors["text"], relief="flat",
+                         insertbackground=colors["text"], font=("Microsoft YaHei UI", 9),
+                         width=5)
+        entry.insert(0, value or "")
+        entry.pack(side="left", ipady=3, ipadx=4)
+        return entry
+
+    title_entry = make_entry(add_row("标题"), title, 34)
+    date_holder = add_row("日期")
+    date_entry = DateEntry(date_holder, value=date, colors=colors,
+                           font=("Microsoft YaHei UI", 9))
+    date_entry.pack(side="left")
+
+    time_holder = add_row("时间")
+    start_entry = make_time_entry(time_holder, start)
+    tk.Label(time_holder, text="起", bg=colors["bg"], fg=colors["text_faint"],
+             font=("Microsoft YaHei UI", 8)).pack(side="left", padx=4)
+    end_entry = make_time_entry(time_holder, end)
+    tk.Label(time_holder, text="止", bg=colors["bg"],
+             fg=colors["text_faint"], font=("Microsoft YaHei UI", 8)).pack(side="left", padx=4)
+
+    location_entry = make_entry(add_row("地点"), location, 34)
+    people_entry = make_entry(add_row("人员"), people, 34)
+
+    notes_holder = add_row("备注")
+    notes_text = tk.Text(notes_holder, bg=colors["card"], fg=colors["text"], relief="flat",
+                         insertbackground=colors["text"], font=("Microsoft YaHei UI", 9),
+                         width=34, height=4, wrap="word")
+    notes_text.insert("1.0", notes or "")
+    notes_text.pack(side="left", fill="both", expand=True)
+
+    hint = tk.Label(window, text="", bg=colors["bg"], fg=theme.readable_accent("#E0555B", colors["bg"]),
+                    font=("Microsoft YaHei UI", 8), anchor="w", justify="left", wraplength=320)
+    hint.pack(fill="x", padx=16)
+
+    def confirm() -> None:
+        nonlocal result
+        new_title = title_entry.get().strip()
+        if not new_title:
+            hint.configure(text="标题不能为空")
+            return
+        if not date_entry.is_complete():
+            hint.configure(text="日期要填完整：年-月-日（例如 2026-09-28）")
+            return
+        new_start = start_entry.get().strip()
+        new_end = end_entry.get().strip()
+        for label, value in (("开始", new_start), ("结束", new_end)):
+            if value and not _TIME_RE.match(value):
+                hint.configure(text=f"{label}时间要写成 HH:MM（例如 09:30），现在是「{value}」")
+                return
+        if new_start and new_end and new_end <= new_start:
+            hint.configure(text=f"结束时间要晚于开始时间（{new_start}）")
+            return
+        result = {
+            "title": new_title,
+            "date": date_entry.get(),
+            "start": new_start,
+            "end": new_end,
+            "location": location_entry.get().strip(),
+            "people": people_entry.get().strip(),
+            "notes": notes_text.get("1.0", "end").strip(),
+        }
+        window.destroy()
+
+    buttons = tk.Frame(window, bg=colors["bg"])
+    buttons.pack(fill="x", padx=16, pady=(2, 14))
+    tk.Button(buttons, text="保存", command=confirm, relief="flat", bd=0,
+              bg=colors["accent"], fg="#FFFFFF", padx=16, pady=6, cursor="hand2",
+              font=("Microsoft YaHei UI", 9, "bold")).pack(side="right")
+    tk.Button(buttons, text="取消", command=window.destroy, relief="flat", bd=0,
+              bg=colors["card"], fg=colors["text"], padx=16, pady=6, cursor="hand2",
+              font=("Microsoft YaHei UI", 9)).pack(side="right", padx=(0, 8))
+    window.bind("<Escape>", lambda _e: window.destroy())
+    window.bind("<Control-Return>", lambda _e: confirm())
+
+    # 与 ask_end_time 同一套顺序：先布局 → 显式写全 WxH+X+Y → 再显示/置顶/抢焦点
+    _center_over(window, parent)
+    try:
+        window.attributes("-topmost", True)
+        window.deiconify()
+        window.lift()
+        window.focus_force()
+    except tk.TclError:
+        try:
+            window.deiconify()
+        except tk.TclError:
+            pass
+    window.grab_set()
+    title_entry.focus_set()
+    parent.wait_window(window)
+    return result
+
+
 def _center_over(window: tk.Toplevel, parent) -> None:
+    """把对话框摆到父窗口附近；父窗口还没布局就退回屏幕中央。
+
+    两条实测结论（都踩过）：
+      * 只给 `+x+y` 不给尺寸时，Tk 在映射阶段会按自己的算法重排，对话框掉到屏幕左上角
+        —— 实测 `263x180+0+0`，而这里算出来的是 `+138+140`。必须显式写全 `WxH+X+Y`。
+      * 父窗口可能还没映射（`winfo_width()` 返回 1），这时 `(1-263)//2` 会被夹成 0，
+        同样落到左上角；所以宽度不可信时改用屏幕居中。
+    """
     try:
         window.update_idletasks()
-        x = parent.winfo_rootx() + max(0, (parent.winfo_width() - window.winfo_width()) // 2)
-        y = parent.winfo_rooty() + 80
-        window.geometry(f"+{max(0, x)}+{max(0, y)}")
+        width, height = window.winfo_width(), window.winfo_height()
+        if width <= 1 or height <= 1:                 # 还没映射：用请求尺寸
+            width, height = window.winfo_reqwidth(), window.winfo_reqheight()
+        screen_w, screen_h = window.winfo_screenwidth(), window.winfo_screenheight()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        if pw <= 1 or ph <= 1:
+            x, y = (screen_w - width) // 2, (screen_h - height) // 3
+        else:
+            x = parent.winfo_rootx() + max(0, (pw - width) // 2)
+            y = parent.winfo_rooty() + max(0, min(80, (ph - height) // 2))
+        x = max(0, min(x, max(0, screen_w - width)))
+        y = max(0, min(y, max(0, screen_h - height)))
+        window.geometry(f"{width}x{height}+{x}+{y}")
+    except tk.TclError:
+        pass
+
+
+def _lower_widget(widget) -> None:
+    """把控件压到同级窗口的最底层。
+
+    为什么不能直接 `widget.lower()`：**Canvas 的 `lower` 方法被"画布条目"的命令占用了**
+    （Tcl 里是 `canvas lower tagOrId ?belowThis?`），对画布调 `widget.lower()`
+    会变成"把某个图元下移"，参数不对就直接抛
+    `wrong # args: should be "... lower tagOrId ?belowThis?"`。
+    绕到 Tcl 的窗口命令 `lower <窗口路径>` 才对。
+    """
+    try:
+        widget.tk.call("lower", widget._w)
     except tk.TclError:
         pass
 
 
 class AgendaPanel:
+    #: 全局热键的登记编号（同一个进程里唯一即可）
+    HOTKEY_ID = 0x4453_0001
+
     def __init__(
         self,
         data_dir: Path,
@@ -164,6 +417,15 @@ class AgendaPanel:
         self.resizable = resizable
         self._hwnd = 0
         self._hidden_by_watcher = False
+        #: 剪贴板全局热键的登记状态（0 表示没登记；hwnd 记着登记在哪个窗口上，注销要用）
+        self._hotkey_id = 0
+        self._hotkey_hwnd = 0
+        self._hotkey_text = ""
+        #: 窗口过程里攒下的待办（热键按下了 / 系统唤醒了）——真正的处理在 _native_tick
+        self._hotkey_pending = False
+        self._wake_pending = False
+        #: client.json 变过没有（变了就重挂热键、重套主题）
+        self._config_dirty = False
         #: 用户主动收起（右键菜单"收起面板"）——此时监控不能把它拉回来
         self._user_hidden = False
         #: 是否被挪到屏幕外（"瞬间隐藏"用挪窗口实现，不是 withdraw）
@@ -192,6 +454,15 @@ class AgendaPanel:
         self.font_family = theme.pick_font_family(self.root)
         self.fonts = theme.Fonts(family=self.font_family)
 
+        # 主题必须在**建控件之前**定下来：`_build_widgets` 里所有 bg/fg 都是当场取色，
+        # 先套好调色板，第一帧就是正确的颜色（不然启动瞬间会闪一下经典深色）。
+        self._theme_picture = None
+        self._header_photo = None
+        self._theme_state = self._resolve_theme()
+        self._theme_slot = ""
+        self._apply_palette(self._theme_state)
+        self._sync_slot()
+
         self._place_window()
         self._build_widgets()
         self.timeline: Timeline | None = None
@@ -199,8 +470,18 @@ class AgendaPanel:
         self._drag_origin: tuple[int, int] | None = None
         self._resize_origin: tuple[int, int, int] | None = None
         self._pipelines: list[str] = []
+        #: 当前"选中"的通知（存 id 而不是 Card：刷新之后 Card 会换成新对象）。
+        #: 选中状态下按热键 = 给这一条补充备注；没选中 = 新建通知。
+        self._selected_event_id: str | None = None
+        #: 上一次点选卡片的时刻（用来区分"再点一下取消"和"双击的第二拍"）
+        self._last_select_at = 0.0
+        #: 这次渲染出来的卡片控件，用来把选中态画上去。
+        self._card_frames: list[tuple[tk.Frame, str | None]] = []
+        #: 前台窗口第一次被看到"覆盖全屏"的时刻（配合 FULLSCREEN_GRACE_MS 判真伪）
+        self._fullscreen_since: float | None = None
 
         theme.apply_windows_flourishes(self.root)
+        self._show_header_photo()
         self.refresh()
         try:
             self.root.after(300, self.start_drop_target)     # 拖放接收（拖文件进来就录入）
@@ -209,11 +490,15 @@ class AgendaPanel:
             pass
         if autostart_pipeline:
             self.root.after(1500, self.run_pipeline)
+        # 热键要等窗口真正建好（winfo_id 可用）再登记，所以排到事件循环里
+        self.root.after(600, self._apply_hotkey)
         self.root.after(self.refresh_ms, self._tick)
         if self.pipeline_ms:
             self.root.after(self.pipeline_ms, self._pipeline_tick)
         self.root.after(20_000, self._reminder_tick)
         self.root.after(700, self._watch_stop_flag)
+        # 窗口过程里攒下的待办（热键/唤醒）在这里执行：**必须**是普通 Tk 回调上下文
+        self.root.after(NATIVE_TICK_MS, self._native_tick)
         if self.window_mode != "topmost":
             self.root.after(400, self._init_desktop_layer)
             self.root.after(DESKTOP_POLL_MS, self._desktop_watch)
@@ -264,8 +549,16 @@ class AgendaPanel:
         self.shell.pack(fill="both", expand=True, padx=self.FRAME_PAD, pady=self.FRAME_PAD)
 
         # 顶部：时间 + 下一项
-        header = tk.Frame(self.shell, bg=colors["bg_soft"], height=int(90 * self.scale))
-        header.pack_propagate(False)
+        # 高度**不写死**：`下一项`那条遇到长标题会折行，写死高度就会把末行裁掉
+        # （用户报「图中的下一项显示不全」，根子就在这儿）。交给 Tk 按内容撑开，
+        # 单行时的高度和以前一样（≈112px），需要几行就长几行。
+        header = tk.Frame(self.shell, bg=colors["bg_soft"])
+        self.header = header
+        # 照片模式的背景层：**先建**再建标签，后建的压在它上面（Tk 的叠放顺序就是创建顺序）。
+        # 不用它的时候 place_forget 掉，对普通主题零影响。
+        self.header_canvas = tk.Canvas(header, highlightthickness=0, bd=0, bg=colors["bg_soft"])
+        self.header_canvas.place(x=0, y=0, relwidth=1, relheight=1)
+        _lower_widget(self.header_canvas)
 
         self.clock_label = tk.Label(
             header, text="--:--", bg=colors["bg_soft"], fg=colors["text"],
@@ -478,6 +771,9 @@ class AgendaPanel:
         self.menu.add_command(label="打开客户端窗口", command=self.open_console)
         self.menu.add_command(label="立即整合群通知", command=self.run_pipeline)
         self.menu.add_command(label="快速录入群消息…", command=self.quick_entry)
+        # 热键的"可见入口"：菜单文案里带上当前组合，用户不用去设置里翻
+        self.menu.add_command(label="从剪贴板录入通知", command=self.ingest_clipboard)
+        self._clip_index = self.menu.index("end")
         self.menu.add_separator()
         self.menu.add_command(label="收起面板（可从客户端或托盘重新打开）", command=self.hide_now)
         self.menu.add_command(label="收起 1 小时", command=self.hide_for_hour)
@@ -506,11 +802,17 @@ class AgendaPanel:
 
     # -- 单条日程的右键操作 ----------------------------------------------
     def _card_menu(self, card: Card, event) -> None:
-        """某一条日程的右键菜单：完成 / 改结束时间 / 删除 / 复制。"""
+        """某一条日程的右键菜单：编辑 / 补充 / 完成 / 改结束时间 / 复制 / 删除。"""
         menu = tk.Menu(self.root, tearoff=0)
         head = card.title if len(card.title) <= 18 else card.title[:17] + "…"
         menu.add_command(label=f"—— {head} ——", state="disabled")
         menu.add_separator()
+        if card.kind == "event":
+            menu.add_command(label="编辑此条通知…", command=lambda: self.card_edit(card))
+            menu.add_command(label="选中此条（下次按热键 = 补充备注）",
+                             command=lambda: self.select_card(card))
+        else:
+            menu.add_command(label="编辑此条通知…（课程请到客户端改）", state="disabled")
         menu.add_command(label="标记为已完成", command=lambda: self.card_done(card))
         menu.add_command(label="修改结束时间…", command=lambda: self.card_edit_end(card))
         menu.add_command(label="复制内容", command=lambda: self.card_copy(card))
@@ -520,6 +822,152 @@ class AgendaPanel:
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             menu.grab_release()
+
+    def _find_event(self, event_id: str | None):
+        """按 id 取回事件（卡片是"快照"，直接改卡片不会落盘）。"""
+        if not event_id:
+            return None
+        from .store import EventStore
+
+        store_path = self.pipeline.store_path
+        try:
+            store = EventStore.load(store_path) if store_path.exists() else EventStore(store_path)
+        except Exception:  # noqa: BLE001
+            return None
+        return next((event for event in store.events if event.id == event_id), None)
+
+    def card_edit(self, card: Card) -> None:
+        """《编辑此条通知》：手动微调解析出来的内容。
+
+        为什么需要：群通知写法千奇百怪，解析器再全也有认不准的时候。
+        以前只能"删掉重新录一遍"，现在可以直接改标题/日期/时间/地点/人员/备注。
+        课程不走这里——课时表在客户端「课程表」页统一维护，改一条会影响所有周次，
+        入口分开更不容易出错。
+        """
+        if card.kind == "course":
+            self._toast("课程请到客户端「课程表」页修改")
+            return
+        target = self._find_event(card.event_id)
+        if target is None:
+            self._toast("这条日程已经不在数据里了，先刷新界面")
+            return
+        edited = ask_edit_event(
+            self.root,
+            title=target.title,
+            date=target.date,
+            start=target.start or "",
+            end=target.end or "",
+            location=target.location or "",
+            people="、".join(target.people or ()),
+            notes=target.notes or "",
+        )
+        if edited is None:
+            return
+        from .store import EventStore
+
+        store_path = self.pipeline.store_path
+        try:
+            store = EventStore.load(store_path) if store_path.exists() else EventStore(store_path)
+            fresh = next((event for event in store.events if event.id == target.id), None)
+            if fresh is None:
+                self._toast("这条日程已经不在数据里了")
+                return
+            fresh.title = edited["title"]
+            fresh.date = edited["date"]
+            fresh.start = edited["start"] or None
+            fresh.end = edited["end"] or None
+            fresh.location = edited["location"] or None
+            fresh.people = tuple(
+                part for part in re.split(r"[、,，;；\s]+", edited["people"]) if part
+            )
+            fresh.notes = edited["notes"] or None
+            fresh.updated_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # 人手改过的内容不该被下一轮整合覆盖掉：留个记号，
+            # 也让"日期待确认"这类自动标记随着人工确认一起消失。
+            if fresh.date_source in ("notice-fallback", "relative"):
+                fresh.date_source = "manual"
+            store.save()
+        except Exception as error:  # noqa: BLE001
+            self._toast(f"保存失败：{error}")
+            return
+        self.refresh()
+        self._toast(f"已保存：{edited['title']}")
+
+    def select_card(self, card: Card) -> None:
+        """把某条通知设为"当前选中"。
+
+        选中之后按热键 = 给这一条**补充备注**；没有选中时按热键 = 新建一条通知。
+        （用户要求：这条规则只对通知生效，对课表无效——课程卡片选不上。）
+        """
+        if card.kind != "event" or not card.event_id:
+            # 课程点一下不该弹提示（用户只是想看看这张卡）：
+            # 只有"本来选中着一条通知、现在点到课程上"才需要说明为什么选不中。
+            had = self._selected_event_id is not None
+            self._clear_selection()
+            if had:
+                self._toast("课程不能作为补充对象，已取消选中")
+            return
+        if self._selected_event_id == card.event_id:
+            now = time.monotonic()
+            if now - self._last_select_at < DOUBLE_CLICK_GUARD:
+                return              # 这是双击的第二拍，保持选中，别来回跳
+            self._clear_selection()
+            self._toast("已取消选中")
+            self._last_select_at = now
+            return
+        self._selected_event_id = card.event_id
+        self._paint_selection()
+        self._toast(f"已选中：{card.title}")
+        self._last_select_at = time.monotonic()
+
+    def _clear_selection(self) -> None:
+        """取消选中，并把跟着它开的详情窗一起收掉。
+
+        用户原话：「取消选中时事项详情的窗口不会自动关闭」——留着那个窗会让人以为
+        还没取消选中（它和卡片是一对的）。
+        """
+        if self._selected_event_id is None:
+            return
+        self._selected_event_id = None
+        self._paint_selection()
+        self.close_card_detail()
+
+    def _selected_event(self):
+        """当前选中的通知（课程 / 没选中 / 已被删掉 → None）。"""
+        return self._find_event(self._selected_event_id)
+
+    def _paint_card_selection(self, frame, event_id: str | None) -> None:
+        """给一张卡画选中态（选中 = 一圈强调色边框）。"""
+        try:
+            if event_id and event_id == self._selected_event_id:
+                frame.configure(highlightbackground=theme.COLORS["accent"],
+                                highlightcolor=theme.COLORS["accent"],
+                                highlightthickness=2)
+            else:
+                frame.configure(highlightthickness=0)
+        except tk.TclError:
+            pass
+
+    def _paint_selection(self) -> None:
+        """重建卡片之后也要能还原选中态，所以按 id 判断、不认控件。"""
+        for frame, event_id in getattr(self, "_card_frames", []):
+            self._paint_card_selection(frame, event_id)
+
+    def _append_note(self, event, addition: str) -> None:
+        """把一段文字并进某条通知的备注里。"""
+        from .store import EventStore
+
+        store_path = self.pipeline.store_path
+        store = EventStore.load(store_path) if store_path.exists() else EventStore(store_path)
+        fresh = next((item for item in store.events if item.id == event.id), None)
+        if fresh is None:
+            self._toast("这条通知已经不在数据里了")
+            return
+        fresh.notes = merge_notes(fresh.notes, addition)
+        fresh.updated_at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        store.save()
+        self.refresh()
+        self._toast(f"已补充到「{fresh.title}」")
 
     def card_done(self, card: Card) -> None:
         """"这件事办完了" —— 从日程里去掉。
@@ -537,6 +985,36 @@ class AgendaPanel:
             self._toast(f"已完成：{card.title}")
             self.refresh()
 
+    def _raised(self):
+        """临时把面板抬到最前，供 panel 自己弹的模态对话框使用（上下文管理器）。
+
+        为什么需要：面板默认沉在桌面层（不是置顶窗口），它弹的 `messagebox` 会**连同
+        面板一起**压在别的窗口下面——用户点了「删除此条…」既看不到确认框、也无法回答，
+        表现就是"这个菜单坏了"（实测桌面模式下对话框 `-topmost` 为 0）。
+        用 `with self._raised():` 包住对话框调用即可，退出时恢复原来的图层设置。
+        """
+        import contextlib
+
+        @contextlib.contextmanager
+        def _manager():
+            try:
+                was = bool(self.root.attributes("-topmost"))
+            except tk.TclError:
+                was = False
+            try:
+                self.root.attributes("-topmost", True)
+                self.root.lift()
+            except tk.TclError:
+                pass
+            try:
+                yield
+            finally:
+                try:
+                    self.root.attributes("-topmost", was or self.window_mode == "topmost")
+                except tk.TclError:
+                    pass
+        return _manager()
+
     def card_delete(self, card: Card) -> None:
         """彻底删除这一条（会问一次）。"""
         if card.kind == "course":
@@ -544,7 +1022,10 @@ class AgendaPanel:
             return
         if not card.event_id:
             return
-        if not messagebox.askyesno("删除日程", f"确定删除「{card.title}」？", parent=self.root):
+        with self._raised():        # 不抬起来的话确认框会被别的窗口盖住（见 _raised）
+            confirmed = messagebox.askyesno("删除日程", f"确定删除「{card.title}」？",
+                                            parent=self.root)
+        if not confirmed:
             return
         if self._remove_event(card.event_id):
             self._toast(f"已删除：{card.title}")
@@ -684,12 +1165,40 @@ class AgendaPanel:
             if region != getattr(self, "_scroll_region", None):
                 self._scroll_region = region
                 self.canvas.configure(scrollregion=region)
+            self._snap_to_top()
         except tk.TclError:
             pass
 
     def _on_canvas_configure(self, event) -> None:
         try:
             self.canvas.itemconfigure(self._inner_id, width=event.width)
+            self._snap_to_top()
+        except tk.TclError:
+            pass
+
+    def _snap_to_top(self) -> None:
+        """把时间线钉在滚动区**最上方**。
+
+        用户原话：「为什么我的日程安排不是处于滚轮条的最上方？不合逻辑。」
+        他截图里内容跑到画布下半、上面空了一大块。Tk 在"内容比画布矮"时的对齐
+        时机不好稳定复现（我试过新建、改尺寸、内容由多变少、真实事件循环四种序列，
+        都是紧贴顶部），所以这里不猜：窗口项固定回 (0,0)、视口回到顶部，
+        并且**延到 idle 再钉一次**——不管 Tk 中途把它摆到了哪儿，最后都会被掰回来。
+        """
+        try:
+            self.canvas.coords(self._inner_id, 0, 0)
+            self.canvas.yview_moveto(0.0)
+        except tk.TclError:
+            pass
+        try:
+            self.root.after_idle(self._snap_to_top_now)
+        except tk.TclError:
+            pass
+
+    def _snap_to_top_now(self) -> None:
+        try:
+            self.canvas.coords(self._inner_id, 0, 0)
+            self.canvas.yview_moveto(0.0)
         except tk.TclError:
             pass
 
@@ -721,6 +1230,9 @@ class AgendaPanel:
         self.width = new_width
         self.root.geometry(f"{new_width}x{height}+{self.root.winfo_x()}+{self.root.winfo_y()}")
         self._apply_text_wrap()
+        # 照片模式的背景要跟着新宽度重新缩放，否则会被拉伸或留白
+        if self._theme_picture is not None:
+            self._show_header_photo()
         # 宽度变了要重排卡片（换行位置跟着变）
         self.refresh()
 
@@ -809,6 +1321,49 @@ class AgendaPanel:
         self._apply_foreground_change()
         self._fg_job = self.root.after(FOREGROUND_POLL_MS, self._fg_poll)
 
+    def _has_open_dialog(self) -> bool:
+        """面板自己弹的窗口（详情 / 编辑通知 / 修改结束时间 / 提醒）有没有开着的。
+
+        开着就**绝不能**把面板挪走：用户正在那个窗里操作。
+        实测：面板被挪到 -4000,-4000 时详情窗本身还在原处（不会跟着消失），
+        但面板一走，用户就没法再跟它互动，看起来就是"弹窗没了"。
+        """
+        root = getattr(self, "root", None)
+        if root is None:
+            return False
+        try:
+            for child in root.winfo_children():
+                if isinstance(child, tk.Toplevel) and child.winfo_ismapped():
+                    return True
+        except Exception:  # noqa: BLE001  纯探测，任何异常都当作"没有弹窗"
+            return False
+        return False
+
+    def _is_really_fullscreen(self) -> bool:
+        """判定"真·全屏应用在前台"。
+
+        两条收紧（都为了不误伤）：
+          * 有自己弹的窗开着 → 不算（见 `_has_open_dialog`）；
+          * 覆盖全屏要**持续** `FULLSCREEN_GRACE_MS` 才算，一闪而过的遮罩不算。
+        """
+        if self._has_open_dialog():
+            self._fullscreen_since = None
+            return False
+        try:
+            from . import winlayer
+            fullscreen = winlayer.fullscreen_foreground()
+        except Exception:  # noqa: BLE001
+            return False
+        if not fullscreen:
+            self._fullscreen_since = None
+            return False
+        now = time.monotonic()
+        since = getattr(self, "_fullscreen_since", None)
+        if since is None:
+            self._fullscreen_since = now
+            return False
+        return (now - since) * 1000 >= FULLSCREEN_GRACE_MS
+
     def _apply_foreground_change(self) -> None:
         """按当前前台状态调整面板（用户切回桌面时几乎无感地出现）。"""
         if getattr(self, "_closing", False):
@@ -818,7 +1373,7 @@ class AgendaPanel:
             hidden = self._hidden_by_watcher
             # 「常驻待机」模式（desktop_only=False）：全屏应用在前台也不隐身，
             # 面板一直待在那儿。给游戏党之外的用户用（比如双屏、或者就想一直看见）。
-            if self.desktop_only and winlayer.fullscreen_foreground():
+            if self.desktop_only and self._is_really_fullscreen():
                 if not hidden:
                     # 挪到屏幕外而不是 withdraw：回来时才能"瞬间"（见 show_now）
                     self.hide_instant()
@@ -930,6 +1485,370 @@ class AgendaPanel:
         except tk.TclError:
             pass
 
+    # ------------------------------------------------------------------
+    # 主题：经典深色 / 随时刻 / 我的照片
+    # ------------------------------------------------------------------
+    def _resolve_theme(self) -> dict:
+        """按配置算出此刻该用的主题：模式、调色板、照片（照片模式才有）。"""
+        from . import backdrop, palettes
+
+        config = self._load_client_config()
+        mode = palettes.normalize_mode(getattr(config, "theme_mode", None) if config else None)
+        picture = None
+        photo_palette = None
+        note = ""
+        if mode == "auto":
+            note = palettes.SLOT_LABELS[palettes.slot_for()]
+        elif mode == "photo":
+            picture = backdrop.load_background(self.data_dir, max_width=max(360, self.width))
+            if picture is None:
+                # 照片被删了/还没选：退回经典深色，而不是给出一张没有配色的界面
+                mode = "classic"
+                note = "照片不可用，已临时使用经典深色"
+            else:
+                photo_palette = backdrop.palette_from_image(picture)
+        palette = palettes.palette_for(mode, photo_palette=photo_palette)
+        return {"mode": mode, "palette": palette, "picture": picture, "note": note}
+
+    def _apply_palette(self, state: dict) -> None:
+        theme.apply_palette(state["palette"])
+        self._theme_picture = state.get("picture")
+
+    def _apply_theme(self, *, force: bool = False) -> None:
+        """重新解析主题并**当场**套用到已有控件上。
+
+        什么时候调：
+          * 用户在控制台改了主题（`client.json` 变动 → `_watch_stop_flag`）；
+          * 「随时刻」模式下跨过时段边界（`_tick` 里检查）；
+          * 面板启动时（在建控件之前，见 `__init__`）。
+        """
+        state = self._resolve_theme()
+        changed = force or state["mode"] != self._theme_state.get("mode") \
+            or state["palette"] != self._theme_state.get("palette")
+        self._theme_state = state
+        self._apply_palette(state)
+        self._sync_slot()
+        if changed:
+            self._recolor_widgets()
+            self._show_header_photo()
+            self.refresh()
+
+    def _sync_slot(self) -> None:
+        """记下当前时段（只对「随时刻」有意义），跨时段时靠它比较出变化。"""
+        from . import palettes
+
+        self._theme_slot = palettes.slot_for() if self._theme_state.get("mode") == "auto" else ""
+
+    def _slot_tick(self) -> None:
+        """「随时刻」模式下，跨过时段边界就换配色（其余模式什么都不做）。"""
+        try:
+            from . import palettes
+
+            if self._theme_state.get("mode") == "auto":
+                current = palettes.slot_for()
+                if current != self._theme_slot:
+                    self._theme_slot = current
+                    self._apply_theme()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _theme_targets(self) -> list[tuple]:
+        """需要跟着主题重新上色的"骨架"控件：(控件, 选项, 调色板键)。
+
+        卡片和日期头不在这里——它们每次 `refresh()` 重建，建的时候自然取到新颜色。
+        """
+        colors = theme.COLORS
+        targets: list[tuple] = [
+            (self.outer, "bg", "border"),
+            (self.shell, "bg", "bg"),
+            (getattr(self, "header", None), "bg", "bg_soft"),
+            (self.clock_label, "bg", "bg_soft"),
+            (self.clock_label, "fg", "text"),
+            (self.date_label, "bg", "bg_soft"),
+            (self.date_label, "fg", "text_dim"),
+            (self.next_label, "bg", "bg_soft"),
+            (self.next_label, "fg", "accent"),
+            (self.body, "bg", "bg"),
+            (self.canvas, "bg", "bg"),
+            (self.inner, "bg", "bg"),
+            (self.footer, "bg", "bg_soft"),
+            (self.status_label, "bg", "bg_soft"),
+            (self.status_label, "fg", "text_faint"),
+            (self.hint_label, "bg", "bg_soft"),
+            (self.hint_label, "fg", "text_faint"),
+            (self.gear, "bg", "bg_soft"),
+        ]
+        return [(widget, option, key) for widget, option, key in targets if widget is not None]
+
+    def _recolor_widgets(self) -> None:
+        colors = theme.COLORS
+        for widget, option, key in self._theme_targets():
+            try:
+                widget.configure(**{option: colors[key]})
+            except (tk.TclError, AttributeError):
+                pass
+        try:
+            # 滚动条是 ttk 之外的原生控件，颜色得单独喂
+            self.scrollbar.configure(troughcolor=colors["bg_soft"],
+                                     background=colors["text_faint"],
+                                     activebackground=colors["accent"])
+        except tk.TclError:
+            pass
+        self._draw_gear(colors["text_dim"])
+
+    def _show_header_photo(self) -> None:
+        """照片模式：把照片铺在顶部标题区（时钟/日期/下一项 压在照片上）。
+
+        为什么只铺顶部而不是整块面板：Tk 的控件**不透明**，卡片和文字框会把照片
+        完全盖住——整屏照片背景得把面板主体改成 Canvas 自绘才行（那是另一档工作量）。
+        铺在顶部既能真正看到照片，又不影响正文的可读性；窗口的其余部分用从照片里
+        算出来的配色，整体是一套的。
+        """
+        header = getattr(self, "header", None)
+        canvas = getattr(self, "header_canvas", None)
+        if header is None or canvas is None:
+            return
+        picture = self._theme_picture
+        try:
+            if picture is None:
+                canvas.delete("all")
+                canvas.place_forget()
+                self._header_photo = None
+                self._header_backdrop_color = None      # 非照片模式别沿用上一张照片的底色
+                return
+            from . import backdrop
+
+            width = max(1, header.winfo_width() or self.width)
+            height = max(1, header.winfo_height() or int(90 * self.scale))
+            # 按标题区尺寸重新缩放：照片实际显示多大就解多大，不做无谓的放大
+            scaled = backdrop.load_background(self.data_dir, max_width=width)
+            if scaled is None:
+                return
+            scrim = theme.COLORS["bg_soft"]
+            # 先朝面板底色混一档（Tk 控件没有透明度，"半透明遮罩"只能预先算进像素里），
+            # 再把高度裁到标题区那么大——按宽度缩放后高度不一定刚好
+            scaled = backdrop.tint_picture(scaled, scrim, 0.45)
+            if scaled.height > height:
+                scaled = backdrop.crop(scaled, 0, 0, scaled.width, height)
+            self._header_photo = backdrop.to_photoimage(self.root, scaled)
+            canvas.delete("all")
+            canvas.configure(width=width, height=scaled.height, bg=scrim)
+            canvas.create_image(0, 0, image=self._header_photo, anchor="nw")
+            # 底部压一层**真渐变**：越往下越接近面板底色，越往上越看得见照片。
+            # （第一版写的是 blend(scrim, scrim, r)——同色混合等于没混，五条同色矩形
+            #   把照片整个盖住，实拍截图里标题区是一块纯色，等于白做。）
+            photo_top = backdrop.sample_region(scaled, 0, 0, scaled.width,
+                                               max(1, scaled.height // 3), step=8)
+            # 记下标题区的**实际**底色（照片 + 遮罩之后），供"下一项"那行挑字色用
+            self._header_backdrop_color = backdrop.blend(photo_top, scrim, 0.5)
+            steps = 6
+            band = max(1, scaled.height // steps)
+            for index in range(steps):
+                ratio = 0.12 + index * (0.86 - 0.12) / max(1, steps - 1)
+                y = scaled.height - band * (steps - index)
+                canvas.create_rectangle(
+                    0, y, width, y + band, outline="",
+                    fill=backdrop.blend(photo_top, scrim, ratio))
+            canvas.place(x=0, y=0, relwidth=1, relheight=1)
+            _lower_widget(canvas)
+        except Exception:  # noqa: BLE001
+            self._header_photo = None
+
+    # ------------------------------------------------------------------
+    # 剪贴板全局热键：按一下就把剪贴板里的群通知解析入库
+    # ------------------------------------------------------------------
+    def _apply_hotkey(self) -> None:
+        """按配置登记（或注销）全局热键；配置改了、面板启动时都会调它。
+
+        为什么登记在**面板**上：面板是常驻进程，而且它本来就负责 inbox 自动整合
+        （`_pipeline_tick`），录入这件事归它管最省事。面板没开时热键不可用——
+        这一条在控制台设置页里写明了，不藏着。
+        """
+        try:
+            from . import hotkey as hotkey_mod
+        except Exception:  # noqa: BLE001
+            return
+        config = self._load_client_config()
+        if config is None:
+            return
+        hwnd = self._hwnd or self.root.winfo_id()
+        enabled = bool(getattr(config, "hotkey_enabled", False))
+        spec = getattr(config, "hotkey", "") or ""
+
+        # 先撤销旧的：用户可能改了组合，也可能直接关掉了开关
+        if self._hotkey_id and self._hotkey_hwnd:
+            hotkey_mod.unregister(self._hotkey_hwnd, self._hotkey_id)
+        self._hotkey_id = 0
+        self._hotkey_hwnd = 0
+
+        if not enabled:
+            self._hotkey_text = ""
+            self._refresh_clipboard_menu_label()
+            return
+        fallback_note = ""
+        try:
+            parsed = hotkey_mod.parse(spec)
+        except hotkey_mod.HotkeyError as error:
+            # 配置里的组合不合法（或这次改成不安全了，例如只带 Shift 的 Shift+Z）：
+            # 退回默认组合并提示，而不是让用户面对"按了没反应"。
+            try:
+                parsed = hotkey_mod.parse(hotkey_mod.DEFAULT_HOTKEY)
+                fallback_note = (f"热键 {spec!r} 不可用（{error}），"
+                                 f"已临时改用 {parsed.text}，请到「设置」里改一个")
+            except hotkey_mod.HotkeyError:
+                self._hotkey_text = ""
+                self._refresh_clipboard_menu_label()
+                return
+
+        # 钩子只要挂一次；重复挂会返回 False，不影响下面登记
+        hotkey_mod.hook_hotkey(hwnd, self._on_hotkey)
+        ok, message = hotkey_mod.register(hwnd, parsed, self.HOTKEY_ID)
+        if ok:
+            self._hotkey_id = self.HOTKEY_ID
+            self._hotkey_hwnd = hwnd
+            self._hotkey_text = parsed.text
+            if fallback_note:
+                self._toast(fallback_note, seconds=10)
+        else:
+            self._hotkey_text = ""
+            self._toast(f"热键 {parsed.text} 没能启用：{message}")
+        self._refresh_clipboard_menu_label()
+
+    def _on_hotkey(self, hotkey_id: int) -> None:
+        """窗口过程回调：**只置一个标记，绝不做别的事**。
+
+        这不是保守，是踩出来的：`WM_HOTKEY` 是在 Tk 派发窗口消息的过程中送进子类过程的，
+        在那里调用 Tk 控件代码（哪怕只是 `refresh()` 重建卡片）会重入 Tcl 的事件处理，
+        后果是**面板进程当场消失**——没有 Python 异常、`panel.log` 也是空的，
+        用户看到的就是"按一下热键，日程表没了"。真正的录入交给 `_native_tick`。
+        """
+        if hotkey_id == self.HOTKEY_ID:
+            self._hotkey_pending = True
+
+    def _native_tick(self) -> None:
+        """在**普通 Tk 回调上下文**里执行窗口过程攒下的待办。
+
+        三条原生回调都必须走这条路（窗口过程里只许置标记）：
+          * `WM_HOTKEY`（剪贴板录入）——原来直接调 `ingest_clipboard()`，实测把进程打死；
+          * 电源/显示变化消息（`_on_system_wake`）——原来直接调 `_apply_foreground_change()`，
+            它内部会 `geometry()` / `SetWindowPos`，属同一类隐患；
+          * 拖放（`dropzone`）本来就是这么做的：窗口过程只入队，`_pump_dropzone` 再抽出来。
+        延迟上限就是 `NATIVE_TICK_MS`（60 ms），肉眼看不出。
+        """
+        if getattr(self, "_closing", False):
+            return
+        if self._wake_pending:
+            self._wake_pending = False
+            if not getattr(self, "_in_wake", False):
+                self._in_wake = True
+                try:
+                    self._apply_foreground_change()
+                except Exception:  # noqa: BLE001
+                    pass
+                finally:
+                    self._in_wake = False
+        if self._hotkey_pending:
+            self._hotkey_pending = False
+            try:
+                self.ingest_clipboard()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self.root.after(NATIVE_TICK_MS, self._native_tick)
+        except tk.TclError:
+            pass
+
+    def ingest_clipboard(self) -> None:
+        """热键/菜单入口：**优先抓"选中的文字"**，没有选区时退回读剪贴板。
+
+        为什么要抓选区：用户的心智是"我在 QQ 里选中这条通知，按一下热键就该录进去"，
+        而不是"先按 Ctrl+C 再按热键"（用户原话：「我要求不需要录入剪贴板，
+        直接选中后使用热键就能识别」）。
+
+        抓到文字之后走哪条路由**面板上有没有选中一条通知**决定（用户要求）：
+          * 选中了某条通知 → 这段文字作为它的**备注补充**并进去；
+          * 没选中 → 照旧当成一条新通知来解析入库。
+        这条规则只对通知生效：课程卡片选不上，选中它等于没选中（会明确提示）。
+
+        抓选区的做法是**借用一下剪贴板**：记住原内容 → 合成 Ctrl+C → 读出来 → 复原。
+        终端类窗口会跳过（那里 Ctrl+C 是中断信号，不能乱发）；
+        设置里可以整体关掉这个行为（`hotkey_selection`）。
+        """
+        try:
+            from . import hotkey as hotkey_mod
+        except Exception:  # noqa: BLE001
+            return
+
+        config = self._load_client_config()
+        use_selection = bool(getattr(config, "hotkey_selection", True))
+        target = self._selected_event()
+        text = ""
+        source = ""
+        note = ""
+        fell_back = False
+        if use_selection:
+            text, note = hotkey_mod.capture_selection()
+            source = "选中的文字"
+        if not text.strip():
+            try:
+                fallback = hotkey_mod.read_clipboard_text()
+            except Exception:  # noqa: BLE001
+                fallback = ""
+            if fallback.strip():
+                text, source = fallback, "剪贴板"
+                # 选区没抓到、退而用剪贴板时要**说出来**：不说的话用户看到的热键结果
+                # 其实是他上一次复制的内容，只会觉得"识别错了"或"没反应"（实测踩过）。
+                # 补充备注时这句话没意义——那时候"选中"指的是面板上选中的卡片。
+                fell_back = bool(note) and target is None
+                note = ""
+            elif note:
+                self._toast(note, seconds=8)
+                return
+        if not text.strip():
+            self._toast("剪贴板里没有文本，也没有检测到选中的文字")
+            return
+        # 整页网页/长文截断：录入只关心通知，超长文本会让解析变慢、界面发顿
+        if len(text) > 20_000:
+            text = text[:20_000]
+
+        if target is not None:
+            # 选中了某条通知：这段文字是它的补充内容，不解析、不新建
+            try:
+                self._append_note(target, text)
+            except Exception as error:  # noqa: BLE001
+                self._toast(f"补充失败：{error}")
+            return
+
+        try:
+            report = self.pipeline.ingest_text(text, source_label=f"热键录入（{source}）")
+        except Exception as error:  # noqa: BLE001
+            self._toast(f"录入失败：{error}")
+            return
+        if report.added or report.updated:
+            self._pipelines.append(f"热键录入 {report.added} 条")
+            self._pipelines = self._pipelines[-3:]
+            self.refresh()
+            origin = "剪贴板（没抓到选中的文字）" if fell_back else source
+            self._toast(f"已录入 {report.added} 条、更新 {report.updated} 条通知（来自{origin}）")
+        elif report.candidates:
+            self._toast("这几条通知之前已经录过了")
+        else:
+            origin = "剪贴板（没抓到选中的文字）" if fell_back else source
+            self._toast(f"{origin}里没有识别到通知（需要带时间和事项的群消息）")
+
+    def _refresh_clipboard_menu_label(self) -> None:
+        """把当前热键写进右键菜单，让用户随时看得见它是什么。"""
+        text = getattr(self, "_hotkey_text", "")
+        label = f"从剪贴板录入通知（{text}）" if text else "从剪贴板录入通知"
+        for menu, index in ((getattr(self, "menu", None), getattr(self, "_clip_index", None)),
+                            (getattr(self, "footer_menu", None), getattr(self, "_clip_index_footer", None))):
+            if menu is None or index is None:
+                continue
+            try:
+                menu.entryconfigure(index, label=label)
+            except tk.TclError:
+                pass
+
     def _build_footer_menu(self) -> None:
         """底部状态栏的右键菜单。
 
@@ -940,6 +1859,8 @@ class AgendaPanel:
         self.footer_menu = tk.Menu(self.root, tearoff=0)
         self.footer_menu.add_command(label="打开客户端窗口", command=self.open_console)
         self.footer_menu.add_command(label="快速录入群消息…", command=self.quick_entry)
+        self.footer_menu.add_command(label="从剪贴板录入通知", command=self.ingest_clipboard)
+        self._clip_index_footer = self.footer_menu.index("end")
         self.footer_menu.add_command(label="立即整合群通知", command=self.run_pipeline)
         self.footer_menu.add_separator()
         self.footer_menu.add_command(label="刷新界面", command=self.refresh)
@@ -970,10 +1891,29 @@ class AgendaPanel:
 
     def quit(self) -> None:
         self._closing = True
+        self._release_hotkey()
         self._destroy_festival()
         self._cancel_jobs()
         self._save_geometry()
         self.root.destroy()
+
+    def _release_hotkey(self) -> None:
+        """退出前把热键还回去。
+
+        不还的话，进程结束后 Windows 也会回收登记，但**下一个进程启动时**可能撞上
+        还没清理干净的那一下（实测表现为"刚重启完热键没反应，过一会儿又好了"）。
+        主动注销是零成本的，顺手做掉。
+        """
+        if not self._hotkey_id or not self._hotkey_hwnd:
+            return
+        try:
+            from . import hotkey as hotkey_mod
+            hotkey_mod.unregister(self._hotkey_hwnd, self._hotkey_id)
+            hotkey_mod.unhook_hotkey(self._hotkey_hwnd)
+        except Exception:  # noqa: BLE001
+            pass
+        self._hotkey_id = 0
+        self._hotkey_hwnd = 0
 
     def _cancel_jobs(self) -> None:
         """把所有还排着的 after 取消掉再销毁窗口。
@@ -1017,21 +1957,32 @@ class AgendaPanel:
                 self.quit()
             return
         if self._data_changed():
+            if self._config_dirty:
+                # 用户在控制台改了设置（热键、主题…）：面板自己重挂/重套，不用重启
+                self._apply_hotkey()
+                self._apply_theme()
             self.refresh()
+        self._slot_tick()
         self.root.after(700, self._watch_stop_flag)
 
     def _data_changed(self) -> bool:
-        """events.json / timetable.json 有没有被别处改过（按 mtime 判断）。"""
+        """数据文件或设置文件有没有被别处改过（按 mtime 判断）。
+
+        client.json 也在盯着：用户在控制台改完热键/主题，面板 700 ms 内就该跟着变，
+        而不是要用户自己去重启面板（"改完跟没改一样"是同一个坑）。
+        """
         stamps: list[tuple[str, float]] = []
-        # calendar.json 也要盯：用户在控制台改完假期/调休，面板 700ms 内就该变样
-        for name in ("events.json", "timetable.json", "calendar.json"):
+        for name in ("events.json", "timetable.json", "calendar.json", "client.json"):
             try:
                 stamps.append((name, (self.data_dir / name).stat().st_mtime))
             except OSError:
                 stamps.append((name, 0.0))
         previous = getattr(self, "_data_stamps", None)
         self._data_stamps = stamps
-        return previous is not None and previous != stamps
+        if previous is None or previous == stamps:
+            return False
+        self._config_dirty = previous[-1][1] != stamps[-1][1]
+        return True
 
     def _load_client_config(self):
         try:
@@ -1067,14 +2018,14 @@ class AgendaPanel:
         winlayer.hook_wake_events(self._hwnd, self._on_system_wake)
 
     def _on_system_wake(self, reason: str = "") -> None:
-        """系统唤醒（解锁/亮屏/分辨率变化）时的即时恢复。"""
-        if getattr(self, "_closing", False) or getattr(self, "_in_wake", False):
-            return
-        self._in_wake = True
-        try:
-            self._apply_foreground_change()
-        finally:
-            self._in_wake = False
+        """窗口过程回调：**只置标记**（同 `_on_hotkey`，这里同样不能碰 Tk）。
+
+        原来这里直接调 `_apply_foreground_change()`，而那里面会 `geometry()` /
+        `SetWindowPos`——和热键那次崩的是同一类：在窗口过程里重入 Tk。
+        现在的恢复延迟上限是 `NATIVE_TICK_MS`（60 ms），与原来的 40 ms 前台快查同一量级。
+        """
+        if not getattr(self, "_closing", False):
+            self._wake_pending = True
 
     def _desktop_watch(self) -> None:
         """兜底巡检：正常靠 `_fg_poll`（100 ms 一次），这个慢轮询只防漏。
@@ -1214,6 +2165,8 @@ class AgendaPanel:
             now=now,
             last_run_text=self.pipeline.last_run_text(),
             calendar=self._calendar_cache,
+            # 面板是"接下来要干什么"的看板：已经结束的通知自动让位
+            hide_past_events=True,
         )
         self.date_label.configure(
             text=self._fit_text(self._date_text(), self.width - int(28 * self.scale),
@@ -1252,10 +2205,11 @@ class AgendaPanel:
 
     def _date_color(self) -> str:
         assert self.timeline is not None
+        background = theme.COLORS["bg_soft"]
         if self.timeline.festival is not None:
-            return self.timeline.festival.accent
+            return theme.readable_accent(self.timeline.festival.accent, background)
         if self.timeline.holiday is not None:
-            return "#F2994A"
+            return theme.readable_accent("#F2994A", background)
         return theme.COLORS["text_dim"]
 
     # -- 节日彩蛋横幅 ----------------------------------------------------
@@ -1369,19 +2323,24 @@ class AgendaPanel:
         assert self.timeline is not None
         item = self.timeline.next_item
         if item is None:
-            self.next_label.configure(text="暂无后续安排", fg=theme.COLORS["text_faint"])
+            self.next_label.configure(text="暂无后续安排", fg=theme.COLORS["text_faint"],
+                                      wraplength=self.width - int(28 * self.scale))
             return
         card = item.card
         head = "进行中 " if item.started else "下一项 "
-        title = card.title if len(card.title) <= 10 else card.title[:9] + "…"
-        text = f"{head}{item.text()} · {title}"
+        # **不再截断标题**：用户原话「图中的下一项显示不全」。
+        # 放不下就折行；头部没写死高度，会跟着让高，末行不会被裁。
+        text = f"{head}{item.text()} · {card.title}"
         if card.start:
             text += f"（{card.start}）"
-        # 用真实字体度量截断：贴边面板没有省略号，超出可用宽度就会被切掉
-        available = self.width - int(28 * self.scale)
+        # 标题区可能压着照片：强调色要按**真实底色**调过才看得清
+        banner = getattr(self, "_header_backdrop_color", None) or theme.COLORS["bg_soft"]
+        color = theme.readable_accent(theme.COLORS["accent"], banner)
+        if item.started:
+            color = theme.readable_accent("#37C978", banner)
         self.next_label.configure(
-            text=self._fit_text(text, available),
-            fg=theme.COLORS["accent"] if not item.started else "#37C978",
+            text=text, fg=color, justify="left",
+            wraplength=self.width - int(28 * self.scale),
         )
 
     def _next_font(self) -> tkfont.Font:
@@ -1418,12 +2377,19 @@ class AgendaPanel:
         复用之后只剩状态色和进度条的更新，量级降到几毫秒。
         """
         assert self.timeline is not None
+        # 卡片控件每轮重排都会重新登记（复用旧控件的那条路也会重新登记），
+        # 不清空的话这个列表会一直涨，选中态也会画到已经被销毁的控件上。
+        self._card_frames = []
         if not self.timeline.total_cards:
             for child in self.inner.winfo_children():
                 child.destroy()
             self._card_cache.clear()
+            # 这一轮一个日期头都没建，旧的那串引用要清掉：留着的话下一轮会对着
+            # 已经销毁的控件调 destroy()（虽然被 try 吞了，但那是悬空引用）。
+            self._day_heads = []
             self._render_empty()
-            self.canvas.yview_moveto(0.0)
+            self._on_inner_configure()
+            self._snap_to_top()
             return
 
         cache = self._card_cache
@@ -1440,6 +2406,12 @@ class AgendaPanel:
                 pass
         self._day_heads = []
         for section in self.timeline.sections:
+            # 没有安排的日子**不占版面**：用户原话「我要求的是只显示有事件任务的那天，
+            # 像 9月29 和 9月30 日，明明没有安排为什么要显示呢？况且此时还是假期期间！」
+            # 今天例外——面板是"今天怎么样"的看板，今天空着本身也是信息，
+            # 而且它是整个列表的锚点（没有它用户会以为面板坏了）。
+            if not section.cards and not section.is_today:
+                continue
             self._render_day(section, reused, cache)
         # 用不上的旧卡片直接销毁（课程/通知被删掉的情况）
         for key, widget in list(cache.items()):
@@ -1451,8 +2423,9 @@ class AgendaPanel:
                 self._card_paint.pop(key, None)
         self._card_cache = dict(reused)
         self._on_inner_configure()
+        self._scroll_region = None
         if not getattr(self, "_scroll_kept", False):
-            self.canvas.yview_moveto(0.0)
+            self._snap_to_top()
         self._scroll_kept = False
 
     def _render_empty(self) -> None:
@@ -1488,7 +2461,8 @@ class AgendaPanel:
         if section.is_weekend and not section.is_today:
             title_color = colors["text_dim"]
         if section.festival is not None:
-            title_color = section.festival.accent
+            # 节日的强调色是按深色底挑的，浅色主题下要就地调暗才看得见
+            title_color = theme.readable_accent(section.festival.accent, head_bg)
         tk.Label(
             head, text=day_heading(section), bg=head_bg, fg=title_color,
             font=self.fonts.spec(self.fonts.heading, "bold"), anchor="w",
@@ -1498,7 +2472,8 @@ class AgendaPanel:
         # "在我给的日期旁边增加小字（调休X月X日日程）"）
         if section.makeup_label:
             tk.Label(
-                head, text=section.makeup_label, bg=head_bg, fg="#F2994A",
+                head, text=section.makeup_label, bg=head_bg,
+                fg=theme.readable_accent("#F2994A", head_bg),
                 font=self.fonts.spec(self.fonts.badge, "bold"), anchor="w",
             ).pack(side="left", padx=(int(6 * scale), 0), pady=int(4 * scale))
 
@@ -1531,6 +2506,11 @@ class AgendaPanel:
             else:
                 widget = self._render_card(card, last=index == len(section.cards) - 1)
             reused[key] = widget
+            # 复用旧控件时不会走 _render_card，所以选中态要在这里**两条路都补**一次
+            frame = getattr(widget, "card_frame", None)
+            if frame is not None:
+                self._card_frames.append((frame, card.event_id))
+                self._paint_card_selection(frame, card.event_id)
 
     def _render_card(self, card: Card, *, last: bool) -> tk.Frame:
         colors = theme.COLORS
@@ -1566,6 +2546,8 @@ class AgendaPanel:
             bg = theme.tint(theme.COLORS["card"], card.color, 0.20)
         card_frame = tk.Frame(row, bg=bg)
         card_frame.pack(side="left", fill="x", expand=True, padx=(0, int(12 * scale)), pady=(int(2 * scale), int(2 * scale)))
+        # 挂在 row 上：`_render_day` 复用旧卡片时拿不到 card_frame，只能从这里取
+        row.card_frame = card_frame
 
         accent = tk.Frame(card_frame, bg=card.color, width=int(3 * scale))
         accent.pack(side="left", fill="y")
@@ -1593,7 +2575,7 @@ class AgendaPanel:
             ).pack(side="left", padx=(int(6 * scale), 0))
         if card.state == "now":
             tk.Label(
-                title_row, text="进行中", bg=bg, fg="#37C978",
+                title_row, text="进行中", bg=bg, fg=theme.readable_accent("#37C978", bg),
                 font=self.fonts.spec(self.fonts.badge, "bold"),
             ).pack(side="right")
 
@@ -1614,7 +2596,7 @@ class AgendaPanel:
         if card.badge:
             tk.Label(
                 content, text=card.badge, bg=bg,
-                fg="#E0555B" if card.tentative else colors["text_faint"],
+                fg=theme.readable_accent("#E0555B", bg) if card.tentative else colors["text_faint"],
                 font=self.fonts.spec(self.fonts.badge), anchor="w", justify="left", wraplength=wrap,
             ).pack(fill="x")
 
@@ -1623,11 +2605,14 @@ class AgendaPanel:
             bar = tk.Canvas(content, height=int(3 * scale), bg=bg, highlightthickness=0, bd=0)
             bar.pack(fill="x", pady=(int(4 * scale), 0))
 
-        # 卡片上的右键 = **这一条自己的菜单**（完成 / 改结束时间 / 删除 / 复制）；
+        # 卡片上的右键 = **这一条自己的菜单**（编辑 / 选中 / 完成 / 改结束时间 / 删除 / 复制）；
         # 面板空白处的右键才是全局菜单。踩过的坑：卡片原来也绑全局菜单，
         # 于是"想关掉这一条"根本没入口。
-        for widget in (card_frame, content, title_row, accent, title_label):
+        # 左键点**整张卡的任何地方**（含时间列、时间轴、备注文字）= 选中/取消选中；
+        # 选中之后按热键就是给这一条补充备注。
+        for widget in _descendants(row):
             widget.bind("<Button-3>", lambda event, item=card: self._card_menu(item, event))
+            widget.bind("<Button-1>", lambda event, item=card: self.select_card(item))
             widget.bind("<MouseWheel>", self._on_wheel)
             widget.bind("<Double-Button-1>", lambda _e, item=card: self.show_card_detail(item))
 
@@ -1684,17 +2669,66 @@ class AgendaPanel:
             pass
 
     def show_card_detail(self, card: Card) -> None:
-        """双击卡片看全文（面板再宽也总有装不下的长文本）。"""
+        """双击卡片看全文（面板再宽也总有装不下的长文本）。
+
+        全局**只保留一个**详情窗：再双击别的卡片就换内容。以前每双击一次新开一个，
+        用户连着看三条就叠了三层窗（他自己截的图里正好是三个）。
+        """
         colors = theme.COLORS
+        if getattr(self, "_detail_window", None) is not None:
+            try:
+                if self._detail_window.winfo_exists():
+                    text = self._detail_text
+                    text.configure(state="normal")
+                    text.delete("1.0", "end")
+                    text.insert("1.0", "\n".join(self._detail_lines(card)))
+                    text.configure(state="disabled")
+                    self._detail_window.title("事项详情")
+                    self._detail_window.lift()
+                    self._detail_window.focus_force()
+                    return
+            except tk.TclError:
+                pass
+            self._detail_window = None
+
         window = tk.Toplevel(self.root)
         window.title("事项详情")
         window.configure(bg=colors["bg"])
-        window.attributes("-topmost", True)
         text = tk.Text(
             window, bg=colors["card"], fg=colors["text"], relief="flat", wrap="word",
             font=self.fonts.spec(self.fonts.body), padx=14, pady=12, width=44, height=14,
         )
         text.pack(fill="both", expand=True, padx=2, pady=2)
+        text.insert("1.0", "\n".join(self._detail_lines(card)))
+        text.configure(state="disabled")
+        window.bind("<Escape>", lambda _e: self.close_card_detail())
+        self._detail_window = window
+        self._detail_text = text
+        # 和「修改结束时间」同样的两个坑：布局前就设 `-topmost`/抢焦点会让 Tk 按默认尺寸
+        # 把窗口映射到左上角；只给 `+x+y` 又会被映射阶段的重排抹掉。
+        # 所以先让控件布局出尺寸，再显式写全 WxH+X+Y，最后才置顶 + 抢焦点。
+        window.update_idletasks()
+        width = window.winfo_reqwidth()
+        height = window.winfo_reqheight()
+        screen_w = window.winfo_screenwidth()
+        screen_h = window.winfo_screenheight()
+        window.geometry(f"{width}x{height}"
+                        f"+{max(0, (screen_w - width) // 2)}+{max(0, (screen_h - height) // 3)}")
+        try:
+            window.attributes("-topmost", True)
+            window.lift()
+            window.focus_force()
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _detail_lines(card: Card) -> list[str]:
+        """详情窗里的正文。
+
+        这里**不写操作说明**（原来是「（Esc 关闭，Ctrl+A 全选复制）」这种）。
+        用户原话：「把图二的那行字删掉，同时类似的解释文字都删掉，太掉价了」——
+        一个只会看内容的窗口不需要教人怎么关它。
+        """
         lines = [
             card.title,
             "",
@@ -1709,16 +2743,19 @@ class AgendaPanel:
             lines.append(f"标签：{card.badge}")
         if card.notes:
             lines.extend(["", "备注：", card.notes])
-        lines.extend(["", "（Esc 关闭，Ctrl+A 全选复制）"])
-        text.insert("1.0", "\n".join(lines))
-        text.configure(state="disabled")
-        window.bind("<Escape>", lambda _e: window.destroy())
-        window.update_idletasks()
-        screen_w = window.winfo_screenwidth()
-        screen_h = window.winfo_screenheight()
-        width = window.winfo_width()
-        height = window.winfo_height()
-        window.geometry(f"+{max(0, (screen_w - width) // 2)}+{max(0, (screen_h - height) // 3)}")
+        return lines
+
+    def close_card_detail(self) -> None:
+        """关掉详情窗（取消选中时也调它）。"""
+        window = getattr(self, "_detail_window", None)
+        self._detail_window = None
+        self._detail_text = None
+        if window is None:
+            return
+        try:
+            window.destroy()
+        except tk.TclError:
+            pass
 
     def _render_status(self) -> None:
         assert self.timeline is not None
