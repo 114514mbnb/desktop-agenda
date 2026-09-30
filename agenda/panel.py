@@ -160,9 +160,18 @@ _TIME_RE = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 #: 弹的窗）跟着从视野里消失。他截图给我看 bug 时正好踩到这一点。
 FULLSCREEN_GRACE_MS = 1500
 
+#: 标题区（照片铺的那一块）的名义高度，逻辑像素。
+#: "框选照片范围"按 `面板宽度 : 这个高度` 锁定框的宽高比，让用户框到的就是最终看到的那一条。
+#: 头部高度本身是自适应的（长了会折行），这里只是给框选用的名义值。
+HEADER_STRIP_HEIGHT = 130
+
 #: 双击判定窗口。卡片上单击=选中/取消选中、双击=看全文，而双击的**第二拍**
 #: 也会被 Tk 当成一次单击发过来——不加保护的话，双击之后卡片反而变成"未选中"。
 DOUBLE_CLICK_GUARD = 0.4
+
+#: 拖动死区（像素）。面板的空白处也能拖，而按下时手会抖一两像素；
+#: 没有这个门限的话，每点一次空白面板就悄悄挪一点。
+DRAG_THRESHOLD = 4
 
 
 def _descendants(widget) -> list:
@@ -398,10 +407,20 @@ class AgendaPanel:
         click_through: bool = False,
         desktop_only: bool = True,
         pet_mode: bool = True,
+        front_on_start: bool = False,
         resizable: bool = True,
+        hide_past: bool = True,
     ):
         self.data_dir = Path(data_dir)
         self.pipeline = Pipeline(self.data_dir)
+        #: 面板是被用户**显式点起来**的（双击快捷方式 / 托盘菜单）吗？
+        #: 是的话启动后临时置顶几秒 —— 桌面挂件平时在浏览器下面，
+        #: 用户点完看不到它，只会得出"点了没反应"（原话）。
+        self.front_on_start = bool(front_on_start)
+        #: 过期的通知要不要占版面。面板默认隐藏（只回答"接下来要做什么"）；
+        #: 留这个开关是为了测试能拿确定的时间看全部卡片 —— 否则用例的结果会
+        #: 随"跑测试时是几点"变化（上午跑绿的、晚上跑红的）。
+        self.hide_past = bool(hide_past)
         # 必须在建 Tk 之前开 DPI 感知：否则 125% 缩放下窗口会被合成器放大 1.25 倍，
         # 右对齐的面板会被推出屏幕。
         self.scale = theme.ensure_dpi_awareness()
@@ -497,11 +516,17 @@ class AgendaPanel:
             self.root.after(self.pipeline_ms, self._pipeline_tick)
         self.root.after(20_000, self._reminder_tick)
         self.root.after(700, self._watch_stop_flag)
+        # 面板自己的托盘图标：只要程序在跑，通知区里就该有它（用户点名要的）。
+        # 排到事件循环里挂，不让它拖慢第一帧。
+        self.root.after(300, self._init_tray)
         # 窗口过程里攒下的待办（热键/唤醒）在这里执行：**必须**是普通 Tk 回调上下文
         self.root.after(NATIVE_TICK_MS, self._native_tick)
         if self.window_mode != "topmost":
             self.root.after(400, self._init_desktop_layer)
             self.root.after(DESKTOP_POLL_MS, self._desktop_watch)
+            if self.front_on_start:
+                # 排在 `_init_desktop_layer`（400 ms）之后：等它把层压好，再提上来
+                self.root.after(700, lambda: self._front_briefly())
         self.root.protocol("WM_DELETE_WINDOW", self.quit)
 
     # ------------------------------------------------------------------
@@ -519,6 +544,11 @@ class AgendaPanel:
         if self.fixed_position is not None:
             x, y = self.fixed_position
             y = max(0, min(int(y), max(0, int(logical_h) - 120)))
+            # x 也要夹：这个坐标可能是从 client.json 读回来的（上次拖到哪儿），
+            # 换过显示器、拔掉副屏、改过缩放之后它可能已经在屏幕外 ——
+            # 不夹的话面板会"启动就看不见"，用户只会得出"日程表自己没了"。
+            # 至少留 80 px 露在屏幕内，够抓住拖回来。
+            x = max(0, min(int(x), max(0, int(logical_w) - 80)))
         else:
             margin = 10
             x = max(0, int(logical_w - self.width - margin))
@@ -577,6 +607,9 @@ class AgendaPanel:
             font=self.fonts.spec(self.fonts.heading, "bold"), anchor="w", justify="left",
         )
         self.next_label.pack(fill="x", padx=int(14 * self.scale), pady=(int(2 * self.scale), int(6 * self.scale)))
+        # 记下这三个标签的 pack 参数：照片模式要把它们摘下来（别盖住照片），
+        # 退出照片模式时再原样装回去。
+        self._remember_header_pack()
 
         # 中部：可滚动时间线
         body = tk.Frame(self.shell, bg=colors["bg"])
@@ -635,10 +668,20 @@ class AgendaPanel:
         footer.pack(fill="x", side="bottom")
         body.pack(fill="both", expand=True)
 
-        for widget in (header, self.clock_label, self.date_label, self.next_label):
+        # 可拖动区：标题区（时钟 / 日期 / 下一项）+ 照片模式盖在标题区上的那块画布
+        # + 正文的空白处。
+        #
+        # 为什么必须带上 `header_canvas`：它在照片模式下铺满整块标题区，而且那时候三个
+        # 标签都被摘掉了。Tk 的事件只发给指针底下的那个控件，而它的 bindtags 里**没有**
+        # 父框架 —— 于是点标题区点到的是画布，绑在 header 上的拖动永远不触发，
+        # 用户看到的就是"日程表拖不动了"。
+        for widget in (header, self.header_canvas, self.clock_label,
+                       self.date_label, self.next_label,
+                       self.shell, self.body, self.canvas, self.inner):
             widget.bind("<Button-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._do_drag)
-        for widget in (self.shell, self.canvas, self.inner, body,
+            widget.bind("<ButtonRelease-1>", self._end_drag)
+        for widget in (self.shell, self.canvas, self.inner, body, self.header_canvas,
                        self.scrollbar, self.clock_label, self.date_label, self.next_label):
             widget.bind("<Button-3>", self._popup_menu)
             widget.bind("<MouseWheel>", self._on_wheel)
@@ -795,10 +838,91 @@ class AgendaPanel:
                 self._toast("已请求客户端显示窗口")
             elif controller.start_console():
                 self._toast("客户端已启动")
+                # 控制台一起来就会自己挂托盘图标，面板这个该撤了（见 panel_tray）
+                self._sync_tray()
             else:
                 self._toast("客户端未能启动，请尝试桌面上的「桌面日程」快捷方式")
         except Exception as error:  # noqa: BLE001
             self._toast(f"无法唤起客户端：{error}")
+
+    # -- 面板自己的托盘图标 ----------------------------------------------
+    def _init_tray(self) -> None:
+        """挂上面板自己的托盘图标。
+
+        用户要求：「托盘图标要一直在：只要程序在跑（哪怕只有面板），
+        任务栏右下角就有它的图标，点它能开控制台」。面板才是常驻进程
+        （开机自启拉的是它），所以图标由面板挂；控制台起来了就交接给它
+        （细节和理由见 `agenda/panel_tray.py`）。
+        """
+        from .panel_tray import TRAY_SYNC_MS, PanelTray
+
+        icon = self.data_dir / "agenda.ico"
+        self._tray = PanelTray(
+            title="桌面日程",
+            icon_path=icon if icon.is_file() else None,
+            on_action=self._tray_action,
+            client_running=self._console_running,
+        )
+        self._sync_tray()
+        try:
+            self._tray_job = self.root.after(TRAY_SYNC_MS, self._tray_tick)
+        except tk.TclError:
+            self._tray_job = None
+
+    def _sync_tray(self) -> None:
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tray.sync()
+
+    def _tray_tick(self) -> None:
+        from .panel_tray import TRAY_SYNC_MS
+
+        if getattr(self, "_closing", False):
+            return
+        self._sync_tray()
+        try:
+            self._tray_job = self.root.after(TRAY_SYNC_MS, self._tray_tick)
+        except tk.TclError:
+            pass
+
+    def _console_running(self) -> bool:
+        """控制台在不在跑（它在跑就由它挂托盘图标，避免通知区里两个一样的图标）。"""
+        try:
+            from .client_app import AppController
+            return AppController(self.data_dir).client_pid() is not None
+        except Exception:                                    # noqa: BLE001
+            return False
+
+    def _tray_action(self, command: int) -> None:
+        """托盘线程回调过来的菜单项：**排到主线程**再做（Tk 不能跨线程碰）。"""
+        try:
+            self.root.after(0, lambda: self._handle_tray(command))
+        except tk.TclError:
+            pass
+
+    def _handle_tray(self, command: int) -> None:
+        from . import tray as tray_mod
+
+        ids = tray_mod.command_ids()
+        if command == ids["open_console"]:
+            self.open_console()
+        elif command == ids["open_panel"]:
+            self.show_now(front=True)
+        elif command == ids["close_panel"]:
+            self.hide_instant()
+        elif command == ids["quick_entry"]:
+            self.quick_entry()
+        elif command == ids["merge"]:
+            self.run_pipeline()
+        elif command == ids["quit"]:
+            self.quit_app()
+
+    def tray_balloon(self, title: str, message: str, *, warning: bool = False) -> bool:
+        """有托盘图标就弹一个气泡（用于"点了没反应"的回执）。"""
+        tray = getattr(self, "_tray", None)
+        if tray is None:
+            return False
+        return tray.balloon(title, message, warning=warning)
 
     # -- 单条日程的右键操作 ----------------------------------------------
     def _card_menu(self, card: Card, event) -> None:
@@ -1132,10 +1256,24 @@ class AgendaPanel:
     # ------------------------------------------------------------------
     def _start_drag(self, event) -> None:
         self._drag_origin = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+        # 记下按下点，配合 DRAG_THRESHOLD 判"这是点击还是拖动"
+        self._drag_press = (event.x_root, event.y_root)
+        self._drag_moved = False
 
     def _do_drag(self, event) -> None:
         if self._drag_origin is None:
             return
+        if not self._drag_moved:
+            press = getattr(self, "_drag_press", None)
+            if press is not None:
+                moved = max(abs(event.x_root - press[0]), abs(event.y_root - press[1]))
+                if moved < DRAG_THRESHOLD:
+                    return
+                # 越过死区才真正开始拖：把原点重新锚在当前位置，
+                # 否则面板会"跳"过那一小段（点击时的抖动也不该让它漂移）
+                self._drag_origin = (event.x_root - self.root.winfo_x(),
+                                     event.y_root - self.root.winfo_y())
+            self._drag_moved = True
         x = event.x_root - self._drag_origin[0]
         y = event.y_root - self._drag_origin[1]
         self.root.geometry(f"+{x}+{y}")
@@ -1236,6 +1374,18 @@ class AgendaPanel:
         # 宽度变了要重排卡片（换行位置跟着变）
         self.refresh()
 
+    def _end_drag(self, _event=None) -> None:
+        """松开鼠标：真的拖过才把新位置落盘。
+
+        为什么在这里存而不是只在退出时存（`quit()` 里那次是原来的唯一一处）：
+        面板被人强杀、机器直接关机时，那一次根本没机会跑 —— 用户拖到哪儿全白费，
+        下次启动又回到默认位置。
+        """
+        if getattr(self, "_drag_moved", False):
+            self._save_geometry()
+        self._drag_moved = False
+        self._drag_origin = None
+
     def _save_geometry(self) -> None:
         """记住面板大小与位置，下次启动沿用。"""
         config = self._load_client_config()
@@ -1246,6 +1396,10 @@ class AgendaPanel:
             config.panel_x = int(self.root.winfo_x())
             config.panel_y = int(self.root.winfo_y())
             config.save(self.data_dir)
+            # 这是**自己**写的配置，别让 700ms 的巡检把它当成"用户在控制台改了设置"：
+            # 否则每拖一次面板就会重挂热键、重套主题（还会顺带刷一次界面）。
+            # 置空之后下一次 `_data_changed()` 会返回"没变化"并重新取基线。
+            self._data_stamps = None
         except Exception:
             pass
 
@@ -1382,8 +1536,10 @@ class AgendaPanel:
             if hidden:
                 self.show_now()
                 self._hidden_by_watcher = False
-            if not self._user_hidden and self._hwnd:
+            if not self._user_hidden and self._hwnd and not self._front_active():
                 # 被"显示桌面"最小化了 → 还原（无论前台是不是桌面）
+                # （`_front_active()`：用户显式要求显示时面板被临时置顶，
+                #   这几秒内不许巡检把它压回底层，否则用户刚看到就没了）
                 if winlayer.is_minimized(self._hwnd):
                     winlayer.restore_window(self._hwnd)
                     if self._hidden_offscreen:
@@ -1596,13 +1752,76 @@ class AgendaPanel:
             pass
         self._draw_gear(colors["text_dim"])
 
-    def _show_header_photo(self) -> None:
-        """照片模式：把照片铺在顶部标题区（时钟/日期/下一项 压在照片上）。
+    def _remember_header_pack(self) -> None:
+        """记下三个标签原本的 pack 参数 —— 照片模式把它们摘下来之后还能原样装回去。"""
+        plan = []
+        for widget in (self.clock_label, self.date_label, self.next_label):
+            try:
+                info = dict(widget.pack_info())
+            except tk.TclError:
+                continue
+            info.pop("in", None)
+            plan.append((widget, info))
+        self._header_pack_plan = plan
 
-        为什么只铺顶部而不是整块面板：Tk 的控件**不透明**，卡片和文字框会把照片
-        完全盖住——整屏照片背景得把面板主体改成 Canvas 自绘才行（那是另一档工作量）。
-        铺在顶部既能真正看到照片，又不影响正文的可读性；窗口的其余部分用从照片里
-        算出来的配色，整体是一套的。
+    def _restore_header_labels(self) -> None:
+        """把三个标签装回版面（退出照片模式时用）。"""
+        for widget, info in getattr(self, "_header_pack_plan", []):
+            if widget.winfo_manager() == "pack":
+                continue
+            try:
+                widget.pack(**info)
+            except tk.TclError:
+                pass
+        try:
+            self.header.configure(height=0)      # 0 = 交回给 pack 自适应
+        except tk.TclError:
+            pass
+
+    def _paint_header_text(self) -> None:
+        """照片模式下，把时钟 / 日期 / 下一项画到标题区的 Canvas 上（文字**压在照片上**）。
+
+        为什么必须换一种画法：Tk 的 Label 底色是**不透明**的，而这三个标签都是
+        `fill="x"` —— 它们横向铺满整条标题区，把照片盖得只剩上下几像素的缝。
+        用户看到的就是"选完照片只是颜色变了、照片没出现"（他报的"没有反应"）。
+        Canvas 文本没有底色，画上去就是"照片 + 字"，这才是这块地方本来的设计意图。
+
+        文字、字体、字色仍然以那三个 Label 为准（它们是状态与度量的事实来源），
+        Label 只是从版面上摘下来，对象保留。
+        """
+        canvas = getattr(self, "header_canvas", None)
+        if canvas is None or self._header_photo is None:
+            return
+        canvas.delete("text")
+        scale = self.scale
+        available = max(80, self.width - int(28 * scale))
+        y = int(10 * scale)
+        for label, wrap in ((self.clock_label, 0), (self.date_label, 0),
+                            (self.next_label, available)):
+            text = label.cget("text")
+            if not text:
+                continue
+            try:
+                item = canvas.create_text(
+                    int(14 * scale), y, text=text, anchor="nw", justify="left",
+                    fill=label.cget("fg"), font=label.cget("font"),
+                    width=wrap or 0, tags="text")
+                box = canvas.bbox(item)
+            except tk.TclError:
+                continue
+            y = (box[3] if box else y) + int(1 * scale)
+        try:
+            self.header.configure(height=y + int(6 * scale))
+        except tk.TclError:
+            pass
+
+    def _show_header_photo(self) -> None:
+        """照片模式：把照片铺在顶部标题区，时钟/日期/下一项 画在照片上。
+
+        为什么文字要换成 Canvas 文本：Tk 的控件**不透明**，Label 的底色会把照片
+        整条盖住（详见 `_paint_header_text`）。整屏照片背景得把面板主体改成 Canvas
+        自绘才行（那是另一档工作量）；顶部这一条既能真正看到照片，又不影响正文可读性，
+        窗口的其余部分用从照片里算出来的配色，整体是一套的。
         """
         header = getattr(self, "header", None)
         canvas = getattr(self, "header_canvas", None)
@@ -1615,8 +1834,13 @@ class AgendaPanel:
                 canvas.place_forget()
                 self._header_photo = None
                 self._header_backdrop_color = None      # 非照片模式别沿用上一张照片的底色
+                self._restore_header_labels()
                 return
             from . import backdrop
+
+            # 文字改由 Canvas 画：先把三个 Label 从版面上摘下来，别让它们的底色盖住照片
+            for label in (self.clock_label, self.date_label, self.next_label):
+                label.pack_forget()
 
             width = max(1, header.winfo_width() or self.width)
             height = max(1, header.winfo_height() or int(90 * self.scale))
@@ -1625,32 +1849,43 @@ class AgendaPanel:
             if scaled is None:
                 return
             scrim = theme.COLORS["bg_soft"]
-            # 先朝面板底色混一档（Tk 控件没有透明度，"半透明遮罩"只能预先算进像素里），
-            # 再把高度裁到标题区那么大——按宽度缩放后高度不一定刚好
-            scaled = backdrop.tint_picture(scaled, scrim, 0.45)
+            # 高度裁到标题区那么大——按宽度缩放后高度不一定刚好。
+            # 从**偏上**的位置取（1/3 处）：照片的视觉重心通常在那儿，
+            # 直接取最上面一条常常是一片天空/一面墙，看着还像"照片没生效"。
             if scaled.height > height:
-                scaled = backdrop.crop(scaled, 0, 0, scaled.width, height)
-            self._header_photo = backdrop.to_photoimage(self.root, scaled)
+                top = max(0, (scaled.height - height) // 3)
+                scaled = backdrop.crop(scaled, 0, top, scaled.width, height)
+            # 渐变**必须算进像素**：Tk 的 Canvas 矩形是不透明的，叠几条上去等于把照片
+            # 盖成一堆纯色（原来就是这么写的，用户看到"选了照片没反应"）。
+            # 上淡下浓：上面尽量看得见照片，往下渐渐化进面板底色，压在上面的字也就不糊。
+            # 强度别调太重：第一版给到 0.34/0.80，实拍出来照片像隔了一层毛玻璃
+            # （用户的原话是"没有反应"，太淡等于白做）。文字的可读性由 readable_ink 负责，
+            # 不靠压低照片来换。
+            fade = backdrop.vertical_fade(scaled, scrim, top=0.16, bottom=0.68)
+            self._header_photo = backdrop.to_photoimage(self.root, fade)
             canvas.delete("all")
-            canvas.configure(width=width, height=scaled.height, bg=scrim)
+            canvas.configure(width=width, height=fade.height, bg=scrim)
             canvas.create_image(0, 0, image=self._header_photo, anchor="nw")
-            # 底部压一层**真渐变**：越往下越接近面板底色，越往上越看得见照片。
-            # （第一版写的是 blend(scrim, scrim, r)——同色混合等于没混，五条同色矩形
-            #   把照片整个盖住，实拍截图里标题区是一块纯色，等于白做。）
-            photo_top = backdrop.sample_region(scaled, 0, 0, scaled.width,
-                                               max(1, scaled.height // 3), step=8)
-            # 记下标题区的**实际**底色（照片 + 遮罩之后），供"下一项"那行挑字色用
-            self._header_backdrop_color = backdrop.blend(photo_top, scrim, 0.5)
-            steps = 6
-            band = max(1, scaled.height // steps)
-            for index in range(steps):
-                ratio = 0.12 + index * (0.86 - 0.12) / max(1, steps - 1)
-                y = scaled.height - band * (steps - index)
-                canvas.create_rectangle(
-                    0, y, width, y + band, outline="",
-                    fill=backdrop.blend(photo_top, scrim, ratio))
+            # 记下标题区的**实际**底色（渐变之后），供"下一项"那行挑字色用
+            self._header_backdrop_color = backdrop.sample_region(
+                fade, 0, 0, fade.width, max(1, fade.height // 3), step=8)
+            # 头部文字按照片的**真实**底色挑深/浅，不然浅色照片上白字会看不清
+            ink = backdrop.readable_ink(self._header_backdrop_color)
+            dim = backdrop.blend(ink, self._header_backdrop_color, 0.25)
+            try:
+                self.clock_label.configure(fg=ink)
+                self.date_label.configure(fg=dim)
+            except tk.TclError:
+                pass
             canvas.place(x=0, y=0, relwidth=1, relheight=1)
             _lower_widget(canvas)
+            # 让"下一项"按新底色重挑一次字色，再把三行字画到照片上。
+            # 只在时间线已经建好时做：构造期 `_show_header_photo()` 早于第一次
+            # `refresh()`，那时 `_render_next()` 的断言会炸（被下面的兜底 except 吞掉，
+            # 表现是照片死活出不来 —— 实测踩过）。
+            if self.timeline is not None:
+                self._render_next()
+            self._paint_header_text()
         except Exception:  # noqa: BLE001
             self._header_photo = None
 
@@ -1891,6 +2126,11 @@ class AgendaPanel:
 
     def quit(self) -> None:
         self._closing = True
+        # 先把托盘图标摘掉再退：进程被系统结束的话图标会**留在通知区**，
+        # 点它永远没反应（用户报过"点了那个图标好长时间都没有响应"，就是这么来的）。
+        tray = getattr(self, "_tray", None)
+        if tray is not None:
+            tray.remove()
         self._release_hotkey()
         self._destroy_festival()
         self._cancel_jobs()
@@ -1956,6 +2196,23 @@ class AgendaPanel:
             else:
                 self.quit()
             return
+        # 「请显示出来」的请求（桌面快捷方式用它）：收起过就展开，没收起就什么也不做。
+        # 快捷方式**只**能走这条 —— 它永远不许开控制台（用户把这条定死了）。
+        show_flag = self.data_dir / "panel.show"
+        if show_flag.exists():
+            try:
+                show_flag.unlink()
+            except OSError:
+                pass
+            if self.root.state() != "withdrawn":
+                was_hidden = getattr(self, "_hidden_offscreen", False)
+                # front=True：桌面挂件平时在浏览器下面，不提上来就等于"没反应"
+                self.show_now(front=True)
+                if not was_hidden:
+                    # 面板本来就在屏幕上：双击快捷方式**看起来什么都没发生**，
+                    # 用户会判断成"点了没反应"（原话）。给两个可见回执。
+                    self._toast("日程表已经在运行")
+                    self.tray_balloon("桌面日程", "日程表已经在运行，就在屏幕上。")
         if self._data_changed():
             if self._config_dirty:
                 # 用户在控制台改了设置（热键、主题…）：面板自己重挂/重套，不用重启
@@ -2066,13 +2323,16 @@ class AgendaPanel:
                     self._popup_reminder(card, item.minutes_until)
         self.root.after(20_000, self._reminder_tick)
 
-    def show_now(self) -> None:
+    def show_now(self, *, front: bool = False) -> None:
         """瞬间把面板放出来。
 
         为什么不用 `withdraw()` + `deiconify()`：那条路要等下一次 `_tick` 才把内容重画，
         实测恢复要 0.5 秒以上，用户的原话是"恢复显示的延迟太高了"。
         改成**只是把窗口挪回屏幕坐标**——窗口一直在（没 withdraw），
         所以挪回来就是一次 SetWindowPos，肉眼看不到延迟。
+
+        `front=True`（用户**显式**要求显示：双击快捷方式 / 托盘菜单 / 齿轮）时，
+        还会把面板临时提到**所有窗口最上面**几秒 —— 见 `_front_briefly()`。
         """
         self._hidden_offscreen = False
         x, y = self._onscreen_position()
@@ -2082,6 +2342,51 @@ class AgendaPanel:
             winlayer.is_minimized(self._hwnd) and winlayer.restore_window(self._hwnd)
             if self.pet_mode:
                 winlayer.raise_to_top_of_normal(self._hwnd)
+        if front:
+            self._front_briefly()
+
+    def _front_briefly(self, *, seconds: float = 3.0) -> None:
+        """临时把面板压在所有窗口最上面，几秒后放回它自己的层。
+
+        为什么需要：面板是**桌面挂件**（`window_mode="desktop"`），平时被
+        `send_to_bottom` 压在普通窗口之下。用户双击桌面快捷方式时它确实"显示了"，
+        但只要浏览器/编辑器是最大化的，它就**被完全盖住** —— 用户看到的是
+        "点了半天没反应"（原话）。所以显式要求显示时，先让他**看得见**。
+        """
+        if not self._hwnd:
+            return
+        from . import winlayer
+        self._front_until = time.monotonic() + max(0.5, seconds)
+        try:
+            self.root.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        winlayer.set_topmost(self._hwnd, True)
+        winlayer.flash_window(self._hwnd)          # 有任务栏按钮时闪一下（没有也不报错）
+        try:
+            self.root.lift()
+            self.root.after(int(max(0.5, seconds) * 1000), self._end_front)
+        except tk.TclError:
+            pass
+
+    def _end_front(self) -> None:
+        """临时置顶结束：回到面板本来该待的层。"""
+        self._front_until = 0.0
+        if getattr(self, "_closing", False) or not self._hwnd:
+            return
+        from . import winlayer
+        try:
+            self.root.attributes("-topmost", False)
+        except tk.TclError:
+            pass
+        winlayer.set_topmost(self._hwnd, False)
+        if self.pet_mode and winlayer.desktop_is_foreground():
+            winlayer.raise_to_top_of_normal(self._hwnd)
+        else:
+            winlayer.send_to_bottom(self._hwnd)
+
+    def _front_active(self) -> bool:
+        return time.monotonic() < getattr(self, "_front_until", 0.0)
 
     def hide_instant(self) -> None:
         """瞬间收起来：把窗口挪到屏幕外，而不是 withdraw。
@@ -2166,7 +2471,7 @@ class AgendaPanel:
             last_run_text=self.pipeline.last_run_text(),
             calendar=self._calendar_cache,
             # 面板是"接下来要干什么"的看板：已经结束的通知自动让位
-            hide_past_events=True,
+            hide_past_events=self.hide_past,
         )
         self.date_label.configure(
             text=self._fit_text(self._date_text(), self.width - int(28 * self.scale),
@@ -2178,6 +2483,10 @@ class AgendaPanel:
         self._render_next()
         self._render_sections()
         self._render_status()
+        # 照片模式下三行字是画在 Canvas 上的（时钟/日期/下一项 刚刚才更新），
+        # 这里跟着重画一遍，否则时间走了字还停在旧值。
+        if self._header_photo is not None:
+            self._paint_header_text()
 
     def _load_calendar(self):
         try:

@@ -50,6 +50,31 @@ def _text_of(widget) -> str:
     return ""
 
 
+def _font_size(font) -> int | None:
+    """从 Tk 的 font 描述里抠出字号。
+
+    `cget("font")` 可能返回 `"{Microsoft YaHei UI} 8"` 这样的字符串，
+    也可能是 Font 对象/元组，所以三种形态都兜一下。
+    """
+    if hasattr(font, "cget"):
+        try:
+            return _font_size(font.cget("size"))
+        except Exception:                                # noqa: BLE001
+            return None
+    if isinstance(font, (tuple, list)):
+        for part in reversed(font):
+            if isinstance(part, int):
+                return part
+        return None
+    if isinstance(font, str):
+        for token in reversed(font.replace("{", " ").replace("}", " ").split()):
+            try:
+                return int(token)
+            except ValueError:
+                continue
+    return None
+
+
 class SettingsPageTests(unittest.TestCase):
     """设置页：只留「启动时显示桌面面板」「到点弹窗提醒」+ 待机模式二选一。"""
 
@@ -132,12 +157,62 @@ class SettingsPageTests(unittest.TestCase):
         checks = [w for w in _walk(frame) if isinstance(w, tk.Checkbutton)]
         radios = [w for w in _walk(frame) if isinstance(w, tk.Radiobutton)]
         self.assertEqual([w.cget("text") for w in checks],
-                         ["启动时显示桌面面板", "到点弹窗提醒", "启用",
-                          "按热键时优先识别「选中的文字」"],
+                         ["启动时显示桌面面板", "到点弹窗提醒",
+                          # 开机自启动（用户点名要的选项）现在和"启动"那几项同卡
+                          "开机后自动打开日程表面板",
+                          "启用", "按热键时优先识别「选中的文字」"],
                          f"复选框不对：{[w.cget('text') for w in checks]}")
         # 单选：待机模式二选一 + 主题三选一
         self.assertEqual([w.cget("text") for w in radios],
                          ["智能隐身", "常驻待机", "经典深色", "随时刻", "我的照片"])
+
+    def test_the_settings_page_has_no_explanatory_small_text(self):
+        """设置页**只留功能名称**。
+
+        用户原话：「我要求把图中的这些小字全部清除仅保留功能名称，没有任何用处，
+        还显得冗余。」—— 所以这一页里不许再有"小字"（字号 8 的 Label）。
+
+        唯一例外是**出错时的提示行**：它默认不占版面，只有真出事（比如热键被别的
+        程序占用）才露面；不给它开口子的话，"保存成功但按下没反应"这类问题就没法说了。
+        """
+        import tkinter as tk
+
+        frame = self._settings_frame()
+        offenders = []
+        for widget in _walk(frame):
+            if not isinstance(widget, tk.Label):
+                continue
+            text = widget.cget("text") or ""
+            if not text.strip():
+                continue
+            try:
+                font = widget.cget("font")
+            except Exception:                          # noqa: BLE001
+                continue
+            size = _font_size(font)
+            if size == 8:
+                offenders.append((text[:40], widget.winfo_manager()))
+        # 允许存在但**必须是隐藏的**（热键出错提示）
+        visible = [item for item in offenders if item[1]]
+        self.assertEqual(visible, [],
+                         f"设置页又有小字说明了：{visible}")
+
+    def test_the_hotkey_error_line_is_hidden_until_something_goes_wrong(self):
+        """提示行默认收起来，别留一行空白。"""
+        import tkinter as tk
+
+        frame = self._settings_frame()
+        labels = [w for w in _walk(frame)
+                  if isinstance(w, tk.Label) and _font_size(w.cget("font")) == 8]
+        for label in labels:
+            self.assertEqual(label.winfo_manager(), "",
+                             f"这行小字默认占着版面：{label.cget('text')!r}")
+
+    def test_every_console_door_is_documented(self):
+        """控制台的入口只剩两个（齿轮 / 托盘），界面上不许再有别的说法。"""
+        frame = self._settings_frame()
+        texts = " ｜ ".join(text for text in (_text_of(w) for w in _walk(frame)) if text)
+        self.assertNotIn("不开控制台", texts, "设置页还在解释控制台的事（该删掉了）")
 
     def test_power_settings_keep_their_config_values(self):
         """保存设置不许把界面上已经删掉的字段写坏。

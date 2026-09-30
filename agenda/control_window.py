@@ -162,6 +162,9 @@ class ControlWindow:
         self.panel_button = self._button(right, "打开面板", self.toggle_panel, primary=True)
         self.panel_button.pack(side="left", padx=(0, 6))
         self._button(right, "刷新", self.refresh_all).pack(side="left", padx=(0, 6))
+        # 教程入口放在**顶栏**：用户找不到教程（原话「你把新手教程放哪里了？」）——
+        # 它原来只在设置页最底下，得先滚到底才看得见。
+        self._button(right, "使用教程", self.open_tutorial).pack(side="left", padx=(0, 6))
         self._button(right, "最小化至托盘", self.minimize_to_tray).pack(side="left")
 
         self.summary_label = tk.Label(
@@ -170,7 +173,8 @@ class ControlWindow:
         )
         self.summary_label.pack(fill="x", padx=14, pady=(0, 10))
 
-    def _button(self, parent, text: str, command, *, primary: bool = False) -> tk.Button:
+    def _button(self, parent, text: str, command, *, primary: bool = False,
+                width: int | None = None) -> tk.Button:
         colors = theme.COLORS
         return tk.Button(
             parent, text=text, command=command, relief="flat", bd=0,
@@ -180,6 +184,7 @@ class ControlWindow:
             activeforeground="#FFFFFF" if primary else colors["text"],
             padx=12, pady=6, cursor="hand2",
             font=("Microsoft YaHei UI", 9, "bold" if primary else "normal"),
+            **({"width": width} if width else {}),
         )
 
     def _build_tabs(self) -> None:
@@ -197,49 +202,46 @@ class ControlWindow:
         frame = tk.Frame(self.notebook, bg=colors["bg"])
         self.notebook.add(frame, text="通知")
 
-        tk.Label(
-            frame, text="将 QQ 群通知粘贴至下方（支持多条：以空行或 [群名] 分隔），粘贴后自动识别并刷新。",
-            bg=colors["bg"], fg=colors["text_dim"], font=("Microsoft YaHei UI", 9),
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-
-        box = tk.Frame(frame, bg=colors["border"])
-        box.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        # ① 录入卡：粘进来 → 看一眼 → 保存
+        body = self._settings_card(frame, "粘贴群通知")
+        box = tk.Frame(body, bg=colors["border"])
+        box.pack(fill="both", expand=True, pady=(0, 8))
         self.notice_text = tk.Text(
             box, bg=colors["card"], fg=colors["text"], insertbackground=colors["text"],
             relief="flat", wrap="word", undo=True, font=("Microsoft YaHei UI", 10),
-            padx=8, pady=6, height=10,
+            padx=8, pady=6, height=9,
         )
         self.notice_text.pack(fill="both", expand=True, padx=1, pady=1)
         self.notice_text.bind("<<Modified>>", self._on_notice_modified)
         self.notice_text.bind("<Control-Return>", lambda _e: self.commit_notice())
 
-        row = tk.Frame(frame, bg=colors["bg"])
-        row.pack(fill="x", padx=12, pady=(0, 6))
-        tk.Label(row, text="来源群名（可选）", bg=colors["bg"], fg=colors["text_dim"],
+        row = tk.Frame(body, bg=colors["bg_soft"])
+        row.pack(fill="x")
+        tk.Label(row, text="来源群名（可选）", bg=colors["bg_soft"], fg=colors["text_dim"],
                  font=("Microsoft YaHei UI", 9)).pack(side="left")
         self.notice_group = tk.Entry(
             row, bg=colors["card"], fg=colors["text"], insertbackground=colors["text"],
             relief="flat", width=18, font=("Microsoft YaHei UI", 9),
         )
         self.notice_group.pack(side="left", padx=(6, 12), ipady=3)
-        self.notice_hint = tk.Label(row, text="", bg=colors["bg"], fg=colors["text_faint"],
+        self.notice_hint = tk.Label(row, text="", bg=colors["bg_soft"], fg=colors["text_faint"],
                                     font=("Microsoft YaHei UI", 9))
         self.notice_hint.pack(side="left")
         self._button(row, "保存并刷新", self.commit_notice, primary=True).pack(side="right")
         self._button(row, "撤销上一条", self.undo_last_notice).pack(side="right", padx=(0, 6))
         self._button(row, "清空通知", self.clear_notices).pack(side="right", padx=(0, 6))
 
-        tk.Label(frame, text="今日与未来一周", bg=colors["bg"], fg=colors["text"],
-                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=12, pady=(6, 2))
+        # ② 日程卡：已经录进来的东西
+        body = self._settings_card(frame, "今日与未来一周")
         # 空状态/说明放这里：**能折行的独立标签**，不再塞进表格单元格
         # （塞进单元格会被列宽硬切，用户看到的就是半句话 —— 踩过）
         self.agenda_hint = tk.Label(
-            frame, text="", bg=colors["bg"], fg=colors["text_faint"],
+            body, text="", bg=colors["bg_soft"], fg=colors["text_faint"],
             font=("Microsoft YaHei UI", 9), justify="left", anchor="w", wraplength=820,
         )
-        self.agenda_hint.pack(fill="x", padx=12, pady=(0, 2))
-        list_box = tk.Frame(frame, bg=colors["border"])
-        list_box.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        self.agenda_hint.pack(fill="x", pady=(0, 4))
+        list_box = tk.Frame(body, bg=colors["border"])
+        list_box.pack(fill="both", expand=True)
         columns = ("date", "time", "title", "place", "people", "group")
         self.agenda_tree = ttk.Treeview(list_box, columns=columns, show="headings", height=8,
                                         style="Agenda.Treeview")
@@ -365,22 +367,26 @@ class ControlWindow:
         frame = tk.Frame(self.notebook, bg=colors["bg"])
         self.notebook.add(frame, text="课程表")
 
-        toolbar = tk.Frame(frame, bg=colors["bg"])
-        toolbar.pack(fill="x", padx=12, pady=(10, 6))
+        # ① 导入卡
+        body = self._settings_card(frame, "导入课表")
+        toolbar = tk.Frame(body, bg=colors["bg_soft"])
+        toolbar.pack(fill="x")
         self._button(toolbar, "从文件识别课表…", self.import_course_file, primary=True).pack(side="left", padx=(0, 6))
         self._button(toolbar, "粘贴课表…", self.paste_table_dialog).pack(side="left", padx=(0, 6))
         self._button(toolbar, "课表体检", self.check_timetable).pack(side="left", padx=(0, 6))
         self._button(toolbar, "导出 WakeUp CSV", self.export_wakeup_csv).pack(side="left", padx=(0, 6))
         self._button(toolbar, "撤销上次导入", self.undo_import).pack(side="left")
 
+        # ② 课程卡
+        body = self._settings_card(frame, "课程列表")
         self.course_hint = tk.Label(
-            frame, text="", bg=colors["bg"], fg=colors["text_faint"],
+            body, text="", bg=colors["bg_soft"], fg=colors["text_faint"],
             font=("Microsoft YaHei UI", 9), justify="left",
         )
-        self.course_hint.pack(anchor="w", padx=12)
+        self.course_hint.pack(anchor="w", pady=(0, 4))
 
-        table_box = tk.Frame(frame, bg=colors["border"])
-        table_box.pack(fill="both", expand=True, padx=12, pady=(4, 6))
+        table_box = tk.Frame(body, bg=colors["border"])
+        table_box.pack(fill="both", expand=True, pady=(0, 8))
         columns = ("name", "weekday", "period", "location", "teacher", "weeks")
         self.course_tree = ttk.Treeview(table_box, columns=columns, show="headings", height=12)
         for key, title, width in (
@@ -396,8 +402,8 @@ class ControlWindow:
         self.course_tree.bind("<Double-1>", lambda _e: self.edit_selected_course())
         self.course_tree.bind("<Delete>", lambda _e: self.delete_selected_course())
 
-        edit_row = tk.Frame(frame, bg=colors["bg"])
-        edit_row.pack(fill="x", padx=12, pady=(0, 10))
+        edit_row = tk.Frame(body, bg=colors["bg_soft"])
+        edit_row.pack(fill="x")
         for text, command in (
             ("新增课程", self.add_course_dialog),
             ("编辑所选", self.edit_selected_course),
@@ -827,16 +833,11 @@ class ControlWindow:
         frame = tk.Frame(self.notebook, bg=colors["bg"])
         self.notebook.add(frame, text="上课时间")
 
-        tk.Label(
-            frame,
-            text=("时、分各有一个下拉框（冒号无需输入）；修改后点击「保存课时」，面板将立即按新时间显示。"),
-            bg=colors["bg"], fg=colors["text_dim"], font=("Microsoft YaHei UI", 9),
-        ).pack(anchor="w", padx=12, pady=(10, 4))
-
-        # 顶部：节数 + 学期设置
-        head = tk.Frame(frame, bg=colors["bg"])
-        head.pack(fill="x", padx=12, pady=(0, 6))
-        tk.Label(head, text="一共几节课", bg=colors["bg"], fg=colors["text_dim"],
+        # ① 节数与学期卡
+        body = self._settings_card(frame, "节数与学期")
+        head = tk.Frame(body, bg=colors["bg_soft"])
+        head.pack(fill="x")
+        tk.Label(head, text="一共几节课", bg=colors["bg_soft"], fg=colors["text_dim"],
                  font=("Microsoft YaHei UI", 9)).pack(side="left")
         self.period_count_var = tk.StringVar(value=str(len(DEFAULT_PERIODS)))
         tk.Spinbox(
@@ -845,20 +846,18 @@ class ControlWindow:
             bg=colors["card"], fg=colors["text"], insertbackground=colors["text"],
             relief="flat", buttonbackground=colors["card"], font=("Microsoft YaHei UI", 9),
         ).pack(side="left", padx=(6, 4), ipady=2)
-        self._button(head, "套用节数", self.apply_period_count).pack(side="left", padx=(0, 12))
-        tk.Label(head, text=f"（{self.MIN_PERIODS}-{self.MAX_PERIODS} 节，修改后将立即重排下方输入框）",
-                 bg=colors["bg"], fg=colors["text_faint"],
-                 font=("Microsoft YaHei UI", 8)).pack(side="left")
+        self._button(head, "套用节数", self.apply_period_count).pack(side="left", padx=(0, 18))
 
-        tk.Label(head, text="　学期开始（第 1 周周一）", bg=colors["bg"], fg=colors["text_dim"],
+        tk.Label(head, text="学期开始（第 1 周周一）", bg=colors["bg_soft"], fg=colors["text_dim"],
                  font=("Microsoft YaHei UI", 9)).pack(side="left")
         # 日期控件：短横线是分隔标签，删不掉也敲不进非数字（用户要求）
         self.term_start_entry = DateEntry(head, colors=colors, font=("Microsoft YaHei UI", 9))
-        self.term_start_entry.pack(side="left", padx=(4, 0))
+        self.term_start_entry.pack(side="left", padx=(6, 0))
 
-        # 课时表：放画布上，节数多了也能滚
-        table_box = tk.Frame(frame, bg=colors["border"])
-        table_box.pack(fill="both", expand=True, padx=12, pady=(0, 6))
+        # ② 每节课时间卡
+        body = self._settings_card(frame, "每节课时间")
+        table_box = tk.Frame(body, bg=colors["border"])
+        table_box.pack(fill="both", expand=True)
         self.period_canvas = tk.Canvas(table_box, bg=colors["bg"], highlightthickness=0)
         bar = tk.Scrollbar(table_box, command=self.period_canvas.yview)
         self.period_canvas.configure(yscrollcommand=bar.set)
@@ -1137,8 +1136,10 @@ class ControlWindow:
         frame = tk.Frame(self.notebook, bg=colors["bg"])
         self.notebook.add(frame, text="假期")
 
-        toolbar = tk.Frame(frame, bg=colors["bg"])
-        toolbar.pack(fill="x", padx=12, pady=(10, 4))
+        # ① 假期卡
+        body = self._settings_card(frame, "假期")
+        toolbar = tk.Frame(body, bg=colors["bg_soft"])
+        toolbar.pack(fill="x", pady=(0, 6))
         self._button(toolbar, "新增假期", self.add_holiday_dialog, primary=True).pack(side="left", padx=(0, 6))
         self._button(toolbar, "按节日预填…", self.prefill_holidays).pack(side="left", padx=(0, 6))
         self._button(toolbar, "从放假通知识别…", self.paste_holiday_notice).pack(side="left", padx=(0, 6))
@@ -1146,13 +1147,13 @@ class ControlWindow:
         self._button(toolbar, "清空假期", self.clear_holidays).pack(side="left")
 
         self.holiday_hint = tk.Label(
-            frame, text="", bg=colors["bg"], fg=colors["text_faint"],
+            body, text="", bg=colors["bg_soft"], fg=colors["text_faint"],
             font=("Microsoft YaHei UI", 9), justify="left", anchor="w",
         )
-        self.holiday_hint.pack(fill="x", padx=12)
+        self.holiday_hint.pack(fill="x", pady=(0, 4))
 
-        holiday_box = tk.Frame(frame, bg=colors["border"])
-        holiday_box.pack(fill="both", expand=True, padx=12, pady=(4, 4))
+        holiday_box = tk.Frame(body, bg=colors["border"])
+        holiday_box.pack(fill="both", expand=True, pady=(0, 8))
         self.holiday_tree = ttk.Treeview(
             holiday_box, columns=("name", "start", "end", "days", "status", "note"),
             show="headings", height=6,
@@ -1170,24 +1171,16 @@ class ControlWindow:
         self.holiday_tree.bind("<Double-1>", lambda _e: self.edit_holiday())
         self.holiday_tree.bind("<Delete>", lambda _e: self.delete_holiday())
 
-        holiday_actions = tk.Frame(frame, bg=colors["bg"])
-        holiday_actions.pack(fill="x", padx=12, pady=(0, 8))
+        holiday_actions = tk.Frame(body, bg=colors["bg_soft"])
+        holiday_actions.pack(fill="x")
         for text, command in (("编辑所选", self.edit_holiday),
                               ("删除所选", self.delete_holiday)):
             self._button(holiday_actions, text, command).pack(side="left", padx=(0, 6))
 
-        tk.Label(frame, text="调休（当日补哪一天的课程）", bg=colors["bg"], fg=colors["text"],
-                 font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w", padx=12, pady=(4, 2))
-        tk.Label(
-            frame,
-            text="例：10月10日（周六）补 10月7日（周三）的课程 → 调休日填 2026-10-10，补课日期填 2026-10-07；"
-                 "面板将在该日期旁标注「调休10月7日日程」。",
-            bg=colors["bg"], fg=colors["text_faint"], font=("Microsoft YaHei UI", 8),
-            justify="left", anchor="w", wraplength=820,
-        ).pack(fill="x", padx=12)
-
-        makeup_box = tk.Frame(frame, bg=colors["border"])
-        makeup_box.pack(fill="both", expand=True, padx=12, pady=(4, 4))
+        # ② 调休卡
+        body = self._settings_card(frame, "调休（当日补哪一天的课程）")
+        makeup_box = tk.Frame(body, bg=colors["border"])
+        makeup_box.pack(fill="both", expand=True, pady=(0, 8))
         self.makeup_tree = ttk.Treeview(
             makeup_box, columns=("date", "weekday", "source", "source_weekday", "label"),
             show="headings", height=5,
@@ -1206,8 +1199,8 @@ class ControlWindow:
         self.makeup_tree.bind("<Double-1>", lambda _e: self.edit_makeup())
         self.makeup_tree.bind("<Delete>", lambda _e: self.delete_makeup())
 
-        makeup_actions = tk.Frame(frame, bg=colors["bg"])
-        makeup_actions.pack(fill="x", padx=12, pady=(0, 10))
+        makeup_actions = tk.Frame(body, bg=colors["bg_soft"])
+        makeup_actions.pack(fill="x")
         self._button(makeup_actions, "新增调休", self.add_makeup_dialog).pack(side="left", padx=(0, 6))
         self._button(makeup_actions, "编辑所选", self.edit_makeup).pack(side="left", padx=(0, 6))
         self._button(makeup_actions, "删除所选", self.delete_makeup).pack(side="left")
@@ -1393,11 +1386,6 @@ class ControlWindow:
         tk.Label(dialog, text="调休日（当日需上课）　→　补课日期（补哪一天）",
                  bg=colors["bg"], fg=colors["text_dim"],
                  font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=16, pady=(12, 2))
-        tk.Label(dialog,
-                 text="例：调休日 2026-10-10（周六）补 2026-10-07（周三）。\n"
-                      "多天就点「添加一行」，一行只对应一天（日期分隔的短横线不可删除）。",
-                 bg=colors["bg"], fg=colors["text_faint"], font=("Microsoft YaHei UI", 8),
-                 justify="left").pack(anchor="w", padx=16)
 
         rows_box = tk.Frame(dialog, bg=colors["bg"])
         rows_box.pack(fill="x", padx=16, pady=(8, 4))
@@ -1567,7 +1555,7 @@ class ControlWindow:
         self.root.wait_window(dialog)
         return result["value"]
 
-    def _form_dialog(self, title: str, fields, *, hint: str = "") -> dict[str, str] | None:
+    def _form_dialog(self, title: str, fields) -> dict[str, str] | None:
         """一个通用的"几行输入框 + 保存/取消"小窗，返回 {key: 文本} 或 None。
 
         `fields` 里每一项是 `(key, 标签, 初值)`，也可以是
@@ -1586,11 +1574,6 @@ class ControlWindow:
 
         body = tk.Frame(dialog, bg=colors["bg"])
         body.pack(fill="both", expand=True, padx=16, pady=12)
-        if hint:
-            tk.Label(body, text=hint, bg=colors["bg"], fg=colors["text_faint"],
-                     font=("Microsoft YaHei UI", 8), justify="left", anchor="w",
-                     wraplength=460).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
-
         widgets: dict[str, object] = {}
         first_field = None
         for offset, field in enumerate(fields):
@@ -1642,6 +1625,25 @@ class ControlWindow:
         return result["value"]
 
     # -- 设置 -----------------------------------------------------------
+    def _settings_card(self, parent, title: str) -> tk.Frame:
+        """设置页里的一块"卡片"：一行标题 + 内容区，四周一圈细边。
+
+        为什么改成卡片：把解释性小字全删掉之后，一整页光秃秃的选项看着像半成品
+        （用户反馈「设置以及教程的 UI 从一个使用者的角度来看不合适」）。
+        层次改由**分组、留白和标题颜色**来表达，而不是靠小字说明。
+        """
+        colors = theme.COLORS
+        outer = tk.Frame(parent, bg=colors["border"])           # 1px 细边
+        outer.pack(fill="x", padx=14, pady=(0, 10))
+        card = tk.Frame(outer, bg=colors["bg_soft"])
+        card.pack(fill="x", padx=1, pady=1)
+        tk.Label(card, text=title, bg=colors["bg_soft"], fg=colors["accent"],
+                 font=("Microsoft YaHei UI", 10, "bold"), anchor="w",
+                 ).pack(fill="x", padx=14, pady=(10, 6))
+        body = tk.Frame(card, bg=colors["bg_soft"])
+        body.pack(fill="x", padx=14, pady=(0, 12))
+        return body
+
     def _build_settings_tab(self) -> None:
         colors = theme.COLORS
         frame = tk.Frame(self.notebook, bg=colors["bg"])
@@ -1651,81 +1653,45 @@ class ControlWindow:
         self.popup_var = tk.BooleanVar(value=self.controller.config.popup_reminders)
         self.desktop_only_var = tk.BooleanVar(value=self.controller.config.desktop_only)
 
-        def check(text: str, variable: tk.BooleanVar) -> None:
+        def check(parent, text: str, variable: tk.BooleanVar) -> None:
             tk.Checkbutton(
-                frame, text=text, variable=variable, bg=colors["bg"], fg=colors["text_dim"],
-                selectcolor=colors["card"], activebackground=colors["bg"],
+                parent, text=text, variable=variable, bg=colors["bg_soft"], fg=colors["text"],
+                selectcolor=colors["card"], activebackground=colors["bg_soft"],
                 activeforeground=colors["text"], font=("Microsoft YaHei UI", 9),
                 highlightthickness=0, bd=0, anchor="w",
-            ).pack(anchor="w", padx=14, pady=2)
+            ).pack(anchor="w", pady=3)
 
-        check("启动时显示桌面面板", self.panel_visible_var)
-        check("到点弹窗提醒", self.popup_var)
+        # ① 启动
+        body = self._settings_card(frame, "启动")
+        check(body, "启动时显示桌面面板", self.panel_visible_var)
+        check(body, "到点弹窗提醒", self.popup_var)
+        self._build_autostart_settings(body)
 
-        # 关闭窗口的行为不再是"选择题"（用户要求：点 X 不能顺手关掉日程表）。
-        # 这里只做说明，真正的退出入口在托盘和面板的右键菜单里。
-        row = tk.Frame(frame, bg=colors["bg"])
-        row.pack(anchor="w", padx=14, pady=(8, 2))
-        tk.Label(row, text="关闭本窗口时", bg=colors["bg"], fg=colors["text_dim"],
-                 font=("Microsoft YaHei UI", 9)).pack(side="left")
-        tk.Label(row, text="最小化至托盘，桌面面板继续显示（完全退出请用托盘或面板的「退出应用」）",
-                 bg=colors["bg"], fg=colors["text_faint"],
-                 font=("Microsoft YaHei UI", 8)).pack(side="left", padx=6)
-
-        # 待机模式：二选一。用户原话是"功能一：持续保持待机，全屏显示其他应用时
-        # 日程表持续运行不关闭；功能二：保持原方案，自动检测 + 定时刷新"。
-        tk.Label(frame, text="待机模式", bg=colors["bg"], fg=colors["text_dim"],
-                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14, pady=(10, 2))
-
-        def radio(text: str, tip: str, value: bool) -> None:
-            row = tk.Frame(frame, bg=colors["bg"])
-            row.pack(anchor="w", padx=16, pady=1)
+        # ② 待机模式（二选一）
+        body = self._settings_card(frame, "待机模式")
+        for text, value in (("智能隐身", True), ("常驻待机", False)):
             tk.Radiobutton(
-                row, text=text, variable=self.desktop_only_var, value=value,
-                bg=colors["bg"], fg=colors["text"], selectcolor=colors["card"],
-                activebackground=colors["bg"], activeforeground=colors["text"],
+                body, text=text, variable=self.desktop_only_var, value=value,
+                bg=colors["bg_soft"], fg=colors["text"], selectcolor=colors["card"],
+                activebackground=colors["bg_soft"], activeforeground=colors["text"],
                 font=("Microsoft YaHei UI", 9, "bold"), highlightthickness=0, bd=0,
                 anchor="w", cursor="hand2",
-            ).pack(side="left")
-            tk.Label(row, text=tip, bg=colors["bg"], fg=colors["text_faint"],
-                     font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(6, 0))
+            ).pack(anchor="w", pady=3)
 
-        radio("智能隐身", "检测到全屏应用时自动让位，切回桌面立刻恢复；面板按定时器持续刷新",
-              True)
-        radio("常驻待机", "全屏运行其他应用（游戏 / 视频）时面板也不隐藏，始终留在屏幕上",
-              False)
+        # ③④⑤ 各自成卡
+        self._build_hotkey_settings(self._settings_card(frame, "剪贴板热键"))
+        self._build_theme_settings(self._settings_card(frame, "面板主题"))
 
-        self._build_hotkey_settings(frame)
-        self._build_theme_settings(frame)
+        # ⑥ 帮助：教程入口常驻在这儿，随时点得到
+        body = self._settings_card(frame, "帮助")
+        self._button(body, "查看使用教程", self.open_tutorial, primary=True).pack(side="left")
+        self._button(body, "打开数据目录", self.open_data_dir).pack(side="left", padx=(6, 0))
+        self._button(body, "定位教程文件", self.reveal_tutorial).pack(side="left", padx=(6, 0))
 
-        # 设置页底部：教程 + 数据目录 —— **常驻**，不在折叠区里，随时点得到。
-        # 教程只有"当场能打开"才会被看，所以这里放一个显眼的一级入口。
-        help_box = tk.Frame(frame, bg=colors["bg_soft"])
-        help_box.pack(fill="x", padx=14, pady=(16, 4))
-        tk.Label(
-            help_box, text="📖 使用教程", bg=colors["bg_soft"], fg=colors["text"],
-            font=("Microsoft YaHei UI", 10, "bold"), anchor="w",
-        ).pack(anchor="w", padx=12, pady=(8, 2))
-        tk.Label(
-            help_box,
-            text="各功能用法与常见问题处理均收录其中，支持搜索。",
-            bg=colors["bg_soft"], fg=colors["text_faint"], anchor="w",
-            font=("Microsoft YaHei UI", 8),
-        ).pack(anchor="w", padx=12)
-        help_buttons = tk.Frame(help_box, bg=colors["bg_soft"])
-        help_buttons.pack(fill="x", padx=12, pady=(6, 10))
-        self._button(help_buttons, "查看使用教程", self.open_tutorial, primary=True).pack(side="left")
-        self._button(help_buttons, "打开数据目录", self.open_data_dir).pack(side="left", padx=(6, 0))
-        self._button(help_buttons, "定位教程文件", self.reveal_tutorial).pack(side="left", padx=(6, 0))
-
-        self._button(frame, "保存设置", self.save_settings, primary=True).pack(anchor="w", padx=14, pady=(10, 6))
-        tk.Label(
-            frame,
-            text=("数据目录：" + str(self.controller.data_dir) + "\n"
-                  "课表导入仅读取所选文件，不联网、不需要账号密码。"),
-            bg=colors["bg"], fg=colors["text_faint"], justify="left",
-            font=("Microsoft YaHei UI", 8),
-        ).pack(anchor="w", padx=14, pady=(4, 0))
+        # 底部：保存（整行，醒目）
+        tk.Frame(frame, bg=colors["bg"]).pack(fill="x", pady=(2, 0))
+        self._button(frame, "保存设置", self.save_settings, primary=True,
+                     width=14).pack(anchor="w", padx=14, pady=(0, 12))
 
     # -- 课表体检 --------------------------------------------------------
     def check_timetable(self) -> None:
@@ -1800,59 +1766,22 @@ class ControlWindow:
         config = self.controller.config
         mode = palettes.normalize_mode(getattr(config, "theme_mode", None))
         self.theme_mode_var = tk.StringVar(value=mode)
+        card = colors["bg_soft"]              # 卡片底色
 
-        tk.Label(frame, text="面板主题", bg=colors["bg"], fg=colors["text_dim"],
-                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14, pady=(10, 2))
-
-        tips = {
-            "classic": "固定配色，不随时间变化",
-            "auto": f"界面跟着天色走，现在是「{palettes.SLOT_LABELS[palettes.slot_for()]}」"
-                    "（清晨 / 白天 / 黄昏 / 深夜 四套）",
-            "photo": "用你自己的照片，文字颜色按背景明暗自动切换",
-        }
         for key in ("classic", "auto", "photo"):
-            row = tk.Frame(frame, bg=colors["bg"])
-            row.pack(anchor="w", padx=16, pady=1)
             tk.Radiobutton(
-                row, text=palettes.MODES[key], variable=self.theme_mode_var, value=key,
-                command=self.apply_theme_choice, bg=colors["bg"], fg=colors["text"],
-                selectcolor=colors["card"], activebackground=colors["bg"],
+                frame, text=palettes.MODES[key], variable=self.theme_mode_var, value=key,
+                command=self.apply_theme_choice, bg=card, fg=colors["text"],
+                selectcolor=colors["card"], activebackground=card,
                 activeforeground=colors["text"], font=("Microsoft YaHei UI", 9, "bold"),
                 highlightthickness=0, bd=0, anchor="w", cursor="hand2",
-            ).pack(side="left")
-            tk.Label(row, text=tips[key], bg=colors["bg"], fg=colors["text_faint"],
-                     font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(6, 0))
+            ).pack(anchor="w", pady=3)
 
-        photo_row = tk.Frame(frame, bg=colors["bg"])
-        photo_row.pack(anchor="w", padx=32, pady=(2, 0))
+        photo_row = tk.Frame(frame, bg=card)
+        photo_row.pack(anchor="w", pady=(8, 0))
         self._button(photo_row, "选择照片…", self.choose_theme_photo).pack(side="left")
+        self._button(photo_row, "调整照片范围…", self.crop_theme_photo).pack(side="left", padx=(6, 0))
         self._button(photo_row, "清除照片", self.clear_theme_photo).pack(side="left", padx=(6, 0))
-        self.theme_hint = tk.Label(
-            frame, text="", bg=colors["bg"], fg=colors["text_faint"], anchor="w",
-            justify="left", wraplength=int(700 * (self.scale or 1.0)),
-            font=("Microsoft YaHei UI", 8),
-        )
-        self.theme_hint.pack(anchor="w", padx=32, pady=(2, 0))
-        self._refresh_theme_hint()
-
-    def _refresh_theme_hint(self) -> None:
-        from . import backdrop, palettes
-
-        config = self.controller.config
-        mode = palettes.normalize_mode(getattr(config, "theme_mode", None))
-        if mode == "photo":
-            path = backdrop.background_path(self.controller.data_dir)
-            if path.is_file():
-                size_kb = path.stat().st_size / 1024
-                text = f"已使用：{path.name}（{size_kb:.0f} KB，存在 data\\theme\\ 下）"
-            else:
-                text = "还没有选择照片：点「选择照片…」（支持 JPG / PNG / BMP / GIF）"
-        else:
-            text = palettes.describe(mode)
-        try:
-            self.theme_hint.configure(text=text)
-        except tk.TclError:
-            pass
 
     def apply_theme_choice(self) -> None:
         """选完主题立刻生效（不用点保存设置）。"""
@@ -1866,10 +1795,15 @@ class ControlWindow:
             return
         config.theme_mode = mode
         self.controller.save()
-        self._refresh_theme_hint()
 
     def choose_theme_photo(self) -> None:
-        from . import backdrop
+        """选照片 → **框选范围** → 转存。
+
+        中间这一步是用户点名要的：面板标题区又宽又扁，而照片多半是竖的，
+        直接取最上面一条常常是一片天空/一面墙，看着像"照片没生效"。
+        框选窗默认给一个"最大居中框"，比例按面板锁死，所见即所得。
+        """
+        from . import backdrop, photo_crop
 
         path = filedialog.askopenfilename(
             title="选择背景照片",
@@ -1878,7 +1812,18 @@ class ControlWindow:
         )
         if not path:
             return
-        ok, message = backdrop.prepare_background(path, self.controller.data_dir)
+        picture = backdrop.load_image(path)
+        if picture is None:
+            messagebox.showwarning("这张照片用不了",
+                                   "这个图片格式读不出来（支持 JPG / PNG / BMP / GIF）",
+                                   parent=self.root)
+            return
+        confirmed, box = photo_crop.ask_photo_crop(
+            self.root, picture, aspect=self._photo_aspect(),
+            colors=theme.COLORS, title="框选照片范围")
+        if not confirmed:
+            return                      # 取消：配置一个字都不动
+        ok, message = backdrop.prepare_background(path, self.controller.data_dir, box=box)
         if not ok:
             messagebox.showwarning("这张照片用不了", message, parent=self.root)
             return
@@ -1887,8 +1832,6 @@ class ControlWindow:
         config.theme_photo = backdrop.BACKGROUND_NAME
         self.controller.save()
         self.theme_mode_var.set("photo")
-        self._refresh_theme_hint()
-        self.theme_hint.configure(text=message)
 
     def clear_theme_photo(self) -> None:
         from . import backdrop
@@ -1900,7 +1843,84 @@ class ControlWindow:
             self.theme_mode_var.set("classic")
         config.theme_photo = ""
         self.controller.save()
-        self._refresh_theme_hint()
+
+    def crop_theme_photo(self) -> None:
+        """重新框选现有照片的范围（用的是转存时留下的那张未裁原图）。"""
+        from . import backdrop, photo_crop
+
+        # 用 source_file() 而不是 source_path()：老数据只存了成品、没有原图副本，
+        # 自己拼路径会得到一个不存在的文件，框选完保存时直接报"找不到这个文件"。
+        original = backdrop.source_file(self.controller.data_dir)
+        source = backdrop.load_source(self.controller.data_dir)
+        if source is None:
+            messagebox.showinfo(
+                "还没有照片",
+                "请先点「选择照片…」挑一张；选过一次之后就能在这里调整范围了。",
+                parent=self.root)
+            return
+        aspect = self._photo_aspect()
+        confirmed, box = photo_crop.ask_photo_crop(self.root, source, aspect=aspect,
+                                                  colors=theme.COLORS,
+                                                  title="调整照片范围")
+        if not confirmed:
+            return
+        ok, message = backdrop.prepare_background(original, self.controller.data_dir,
+                                                 box=box)
+        if not ok:
+            messagebox.showwarning("这张照片用不了", message, parent=self.root)
+            return
+        config = self.controller.config
+        config.theme_mode = "photo"
+        config.theme_photo = backdrop.BACKGROUND_NAME
+        self.controller.save()
+        self.theme_mode_var.set("photo")
+
+    def _photo_aspect(self) -> float:
+        """照片成品的宽高比 = 面板宽度 : 标题区高度。
+
+        框选按这个比例锁死，用户框到的就是最终看到的那一条（所见即所得）。
+        面板宽度用户可调，所以现算；标题区高度的名义值在 panel.py 里。
+        """
+        from .panel import HEADER_STRIP_HEIGHT
+
+        width = float(getattr(self.controller.config, "panel_width", None) or 360)
+        return max(1.5, min(5.0, width / max(1, HEADER_STRIP_HEIGHT)))
+
+    # -- 开机自启动 ------------------------------------------------------
+    def _build_autostart_settings(self, frame) -> None:
+        """开机自启动：只开面板（用户要求写死，界面不给改）。
+
+        开关的真值在**文件系统**上（启动文件夹里有没有那个快捷方式），不在配置里：
+        这样用户自己删掉快捷方式之后，界面上的勾也会跟着变，不会两边打架。
+        """
+        from . import autostart
+
+        colors = theme.COLORS
+        card = colors["bg_soft"]
+        self.autostart_var = tk.BooleanVar(value=autostart.is_enabled())
+        tk.Checkbutton(
+            frame, text="开机后自动打开日程表面板", variable=self.autostart_var,
+            command=self.apply_autostart, bg=card, fg=colors["text"],
+            selectcolor=colors["card"], activebackground=card,
+            activeforeground=colors["text"], font=("Microsoft YaHei UI", 9, "bold"),
+            highlightthickness=0, bd=0, anchor="w", cursor="hand2",
+        ).pack(anchor="w", pady=3)      # 与"启动"卡里另外两个勾对齐（不留额外缩进）
+
+    def apply_autostart(self) -> None:
+        """勾 / 取消勾选：立刻在启动文件夹里建或删那个快捷方式。"""
+        from . import autostart
+
+        want = bool(self.autostart_var.get())
+        root = getattr(self.controller, "project_root", None) or Path(__file__).resolve().parent.parent
+        if want:
+            ok, message = autostart.enable(root)
+        else:
+            ok, message = autostart.disable()
+        # 以文件系统的**真实**状态回填复选框：失败时勾要弹回去，不能骗人
+        self.autostart_var.set(autostart.is_enabled())
+        # 成功不给回执（设置页只留功能名称）；失败必须说，否则用户只会看到"勾了没用"
+        if not ok:
+            messagebox.showwarning("开机自启动", message, parent=self.root)
 
     # -- 剪贴板热键 ------------------------------------------------------
     #: Tk 的 keysym → 我们能解析的键名（只列需要改名的，字母数字/F1-F24 直接透传）
@@ -1926,15 +1946,14 @@ class ControlWindow:
         """
         colors = theme.COLORS
         config = self.controller.config
-        tk.Label(frame, text="剪贴板热键", bg=colors["bg"], fg=colors["text_dim"],
-                 font=("Microsoft YaHei UI", 9)).pack(anchor="w", padx=14, pady=(10, 2))
+        card = colors["bg_soft"]              # 卡片底色（设置页用卡片分组）
 
-        row = tk.Frame(frame, bg=colors["bg"])
+        row = tk.Frame(frame, bg=card)
         row.pack(anchor="w", padx=16, pady=1)
         self.hotkey_enabled_var = tk.BooleanVar(value=bool(getattr(config, "hotkey_enabled", True)))
         tk.Checkbutton(
-            row, text="启用", variable=self.hotkey_enabled_var, bg=colors["bg"],
-            fg=colors["text_dim"], selectcolor=colors["card"], activebackground=colors["bg"],
+            row, text="启用", variable=self.hotkey_enabled_var, bg=card,
+            fg=colors["text_dim"], selectcolor=colors["card"], activebackground=card,
             activeforeground=colors["text"], font=("Microsoft YaHei UI", 9),
             highlightthickness=0, bd=0,
         ).pack(side="left")
@@ -1950,34 +1969,30 @@ class ControlWindow:
         self.hotkey_entry.bind("<KeyPress>", self._capture_hotkey)
         self._button(row, "检测并保存", self.save_hotkey, primary=True).pack(side="left")
 
+        # ⚠ 这一区**没有小字说明**（用户要求设置页只留功能名称）。
+        # 热键的用法与限制写在 docs\教程.md；这里只在**出错**时借提示行说一句，
+        # 因为"保存成功但按了没反应"比一句说明更难受。
         self.hotkey_hint = tk.Label(
-            frame, text="", bg=colors["bg"], fg=colors["text_faint"], anchor="w",
+            frame, text="", bg=card, fg=colors["text_faint"], anchor="w",
             justify="left", wraplength=int(700 * (self.scale or 1.0)),
             font=("Microsoft YaHei UI", 8),
         )
         self.hotkey_hint.pack(anchor="w", padx=16, pady=(2, 0))
+        self.hotkey_hint.pack_forget()          # 没有话要说时就不占地方
 
         # 「选中文字就能识别」的开关：默认开。关掉它就是"只读剪贴板里已有的内容"，
         # 给不喜欢"程序替我按 Ctrl+C"的人留一条路（终端用户尤其需要）。
-        select_row = tk.Frame(frame, bg=colors["bg"])
-        select_row.pack(anchor="w", padx=16, pady=(4, 0))
+        select_row = tk.Frame(frame, bg=card)
+        select_row.pack(anchor="w", pady=(6, 0))
         self.hotkey_selection_var = tk.BooleanVar(
             value=bool(getattr(config, "hotkey_selection", True)))
         tk.Checkbutton(
             select_row, text="按热键时优先识别「选中的文字」", variable=self.hotkey_selection_var,
-            command=self.save_hotkey_selection, bg=colors["bg"], fg=colors["text_dim"],
-            selectcolor=colors["card"], activebackground=colors["bg"],
+            command=self.save_hotkey_selection, bg=card, fg=colors["text_dim"],
+            selectcolor=colors["card"], activebackground=card,
             activeforeground=colors["text"], font=("Microsoft YaHei UI", 9),
             highlightthickness=0, bd=0, anchor="w",
         ).pack(side="left")
-        tk.Label(
-            select_row,
-            text="（会在前台程序里模拟一次 Ctrl+C，读完把剪贴板恢复原样；终端窗口会自动跳过）",
-            bg=colors["bg"], fg=colors["text_faint"], font=("Microsoft YaHei UI", 8),
-        ).pack(side="left", padx=(6, 0))
-        self._set_hotkey_hint(
-            "在输入框里直接按下想用的组合键（例如 Ctrl+Alt+Q），再点「检测并保存」；"
-            "热键由日程表面板注册，面板未运行时不可用。", faint=True)
 
         # 打开设置页时就检查一遍**已保存**的组合：组合可能是在规则收紧之前设的
         # （例如只带 Shift 的 Shift+Z——它会在你打大写字母时被触发）。
@@ -1996,15 +2011,30 @@ class ControlWindow:
         config = self.controller.config
         config.hotkey_selection = bool(self.hotkey_selection_var.get())
         self.controller.save()
-        state = "已开启：按热键时会尝试抓取前台选中的文字" if config.hotkey_selection \
-            else "已关闭：按热键时只读剪贴板里已有的内容"
-        self._set_hotkey_hint(state)
+        # 不给回执：设置页只留功能名称，开关本身就是状态
+        self._set_hotkey_hint("")
 
     def _set_hotkey_hint(self, text: str, *, error: bool = False, faint: bool = False) -> None:
+        """设置页唯一的提示行：**只在出错时露面**。
+
+        用户要求设置页只留功能名称（「这些小字全部清除……没有任何用处，还显得冗余」），
+        所以"已保存""已填入""已开启"这类回执一律不显示；空文本就把整行收起来，
+        不留一行空白在那儿。
+        但"这个组合被别的程序占用了"必须说 —— 否则用户看到的会是
+        「保存成功但按下没反应」，那比一句说明难受得多。
+        """
+        if not text:
+            try:
+                self.hotkey_hint.pack_forget()
+            except tk.TclError:
+                pass
+            return
         colors = theme.COLORS
         color = "#E0555B" if error else ("#37C978" if not faint else colors["text_faint"])
         try:
             self.hotkey_hint.configure(text=text, fg=color)
+            if not self.hotkey_hint.winfo_manager():
+                self.hotkey_hint.pack(anchor="w", padx=16, pady=(2, 0))
         except tk.TclError:
             pass
 
@@ -2042,7 +2072,6 @@ class ControlWindow:
             self.hotkey_var.set(text)
         except tk.TclError:
             pass
-        self._set_hotkey_hint(f"已填入 {text}，点「检测并保存」生效", faint=True)
         return "break"                        # 别让字符落进输入框
 
     def save_hotkey(self) -> None:
@@ -2057,7 +2086,7 @@ class ControlWindow:
         if not enabled:
             config.hotkey_enabled = False
             self.controller.save()
-            self._set_hotkey_hint("已关闭热键（日程表面板会在 1 秒内释放这个组合）")
+            self._set_hotkey_hint("")
             return
 
         # 保存的就是当前正用的组合时不算冲突：那是我们自己的
@@ -2066,7 +2095,7 @@ class ControlWindow:
                 and getattr(config, "hotkey_enabled", False):
             config.hotkey = hotkey_mod.describe(text)
             self.controller.save()
-            self._set_hotkey_hint(f"已保存：{config.hotkey}（日程表面板正在使用这个组合）")
+            self._set_hotkey_hint("")
             return
 
         ok, message = hotkey_mod.check(text)
@@ -2076,7 +2105,7 @@ class ControlWindow:
         config.hotkey = hotkey_mod.describe(text)
         config.hotkey_enabled = True
         self.controller.save()
-        self._set_hotkey_hint(f"已保存：{config.hotkey}。日程表面板会在 1 秒内启用它。")
+        self._set_hotkey_hint("")
 
     # -- 教程入口 -------------------------------------------------------
     def open_tutorial(self) -> None:
@@ -2436,6 +2465,7 @@ class ControlWindow:
             except OSError:
                 pass
             self.open_settings()
+            self._bring_to_front()
         show_flag = data_dir / SHOW_REQUEST
         if show_flag.exists():
             try:
@@ -2443,6 +2473,7 @@ class ControlWindow:
             except OSError:
                 pass
             self.show()
+            self._bring_to_front()
         quit_flag = data_dir / QUIT_REQUEST
         if quit_flag.exists():
             try:
@@ -2452,6 +2483,35 @@ class ControlWindow:
             # 这里**不能**调 on_close()：那只是"最小化至托盘"，托盘图标和进程都会留下，
             # 而用户在面板上点的是「退出应用（面板与托盘一并退出）」（真踩过）。
             self.quit_app()
+
+    def _bring_to_front(self) -> None:
+        """把控制台窗口放到最前，并让任务栏按钮闪一下。
+
+        用户的原话：「点托盘图标/快捷方式时，把控制台窗口带到最前面，并在任务栏闪烁提醒」。
+        只 `lift()` 是不够的：窗口在别的程序后面、或者被最小化了，用户还是看不到；
+        任务栏闪一下是 Windows 上最标准的"看这里"。
+        """
+        try:
+            self.root.deiconify()
+            self.root.lift()
+        except tk.TclError:
+            return
+        hwnd = getattr(self, "_hwnd", 0)
+        if not hwnd:
+            # Tk 的 winfo_id() 给的是内部子窗口句柄，带标题栏的那层要往上找一层
+            # （theme.py 里设置 DPI 时也是这么干的）
+            try:
+                import ctypes
+
+                child = int(self.root.winfo_id())
+                parent = int(ctypes.windll.user32.GetParent(child) or 0)
+                hwnd = parent or child
+                self._hwnd = hwnd
+            except Exception:                                # noqa: BLE001
+                return
+        from . import winlayer
+
+        winlayer.bring_to_front(hwnd, flash=True)
 
     def stop_tick(self) -> None:
         """取消所有定时任务（关窗时调用）。

@@ -30,6 +30,9 @@ SHOW_REQUEST = "client.show"
 QUIT_REQUEST = "client.quit"
 #: 请已经在跑的客户端把窗口显示出来**并切到设置页**（面板右下角那个小齿轮用它）
 SETTINGS_REQUEST = "client.settings"
+#: 请已经在跑的**面板**把自己显示出来（收起过、或被全屏应用挡住时用）。
+#: 桌面快捷方式走这条：双击快捷方式只负责"把日程表叫到眼前"，绝不叫控制台。
+SHOW_PANEL_REQUEST = "panel.show"
 
 
 class AppController:
@@ -50,6 +53,19 @@ class AppController:
     def request_settings(self) -> bool:
         """请已经在跑的客户端显示窗口并切到「设置」页（面板右下角齿轮用）。"""
         return self._write_request(SETTINGS_REQUEST)
+
+    def request_show_panel(self) -> bool:
+        """请已经在跑的**面板**把自己显示出来（它每 700ms 巡检 `panel.show`）。
+
+        为什么写文件而不是给面板发消息：面板是独立进程，图省事又可靠的办法就是
+        留一个请求文件（和 `panel.stop` 同一套机制，那条已经跑得很稳）。
+        """
+        path = self.data_dir / SHOW_PANEL_REQUEST
+        try:
+            path.write_text(str(os.getpid()), encoding="utf-8")
+        except OSError:
+            return False
+        return True
 
     def _write_request(self, name: str) -> bool:
         pid = self.client_pid()

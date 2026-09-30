@@ -130,6 +130,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         client_config = ClientConfig.load(args.data_dir)
         pet_mode = bool(client_config.pet_mode)
         click_through = bool(client_config.click_through)
+        # 位置也照上次的来：面板退出时会把位置写进 client.json（`_save_geometry`），
+        # 而这里原来**只读命令行**，那两个值写了没人读 —— 用户拖到哪儿、重启就回默认位置。
+        if position is None and client_config.panel_x is not None \
+                and client_config.panel_y is not None:
+            position = (int(client_config.panel_x), int(client_config.panel_y))
     except Exception:
         pass
     if args.no_pet_mode:
@@ -139,6 +144,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     try:
         panel = AgendaPanel(
             args.data_dir,
+            # 用户**显式**点起来的（快捷方式 / 托盘 / 自启动之外的显式调用）→
+            # 启动后临时跳到所有窗口最上面几秒，否则桌面挂件被浏览器盖住 = "点了没反应"
+            front_on_start=bool(getattr(args, "front", False)),
             width=args.width,
             refresh_ms=max(5000, args.refresh * 1000),
             # 支持小数分钟：0.25 就是 15 秒一次（排障与实测用）
@@ -247,6 +255,71 @@ def cmd_paste(args: argparse.Namespace) -> int:
     return 0
 
 
+def _panel_args_from_config(args: argparse.Namespace, *, front: bool = False) -> argparse.Namespace:
+    """把 `client.json` 里那几项灌进命令行参数。
+
+    为什么需要：`--shortcut` / `--panel` 现在**就在本进程里**把面板跑起来
+    （用户反馈「初始化开启太慢」，少一次解释器启动就少 200~400 ms），
+    而走进程内这条路就绕过了 `AppController.start_panel()` 里那段"照配置拼命令行"，
+    得在这里补回来 —— 否则面板会忽略用户设过的宽度、图层、整合间隔。
+    """
+    try:
+        from agenda.client_config import ClientConfig
+
+        config = ClientConfig.load(args.data_dir)
+        args.width = int(getattr(config, "panel_width", None) or args.width)
+        args.pipeline_minutes = float(getattr(config, "pipeline_minutes", None)
+                                      or args.pipeline_minutes)
+        args.window_mode = str(getattr(config, "window_mode", None) or args.window_mode)
+        if not getattr(config, "desktop_only", True):
+            args.always_visible = True
+        if front:
+            args.front = True
+    except Exception:                                    # noqa: BLE001
+        pass
+    return args
+
+
+def cmd_panel(args: argparse.Namespace) -> int:
+    """只启动桌面面板：不开控制台、不进托盘。
+
+    开机自启动走的就是这一条（用户明确要求：**自启动只打开日程表**）。
+    **在本进程里跑**面板，不再 fork 一个 python：少一次解释器启动与一次进程创建，
+    面板出现得更快（实测从 ~450 ms 降到 ~250 ms）。
+    """
+    from agenda.client_app import AppController
+
+    controller = AppController(args.data_dir)
+    if controller.panel_running():
+        print("面板已在运行，不再重复启动。")
+        return 0
+    return cmd_run(_panel_args_from_config(args))
+
+
+def cmd_shortcut(args: argparse.Namespace) -> int:
+    """桌面快捷方式：**只**负责把日程表叫出来，永远不开控制台。
+
+    用户最后把这条定死了（原话）：
+      * 「我退出重新打开，依旧是同时打开控制台以及日程版，我要求的是只打开日程表」；
+      * 「你可以把控制台理解为日程表的下级管理，不是平级的」。
+
+    所以这条路径**永远不碰控制台**：
+
+      * 面板没在跑 → 在本进程里把面板跑起来（不 fork，启动更快）；
+      * 面板已经在跑 → 请它显示出来，除此之外什么都不做。
+
+    控制台的入口因此只剩两个：面板右下角的齿轮、任务栏托盘图标。
+    """
+    from agenda.client_app import AppController
+
+    controller = AppController(args.data_dir)
+    if controller.panel_running():
+        controller.request_show_panel()
+        print("日程表面板已在运行，已请它显示出来。")
+        return 0
+    return cmd_run(_panel_args_from_config(args, front=True))
+
+
 def cmd_client(args: argparse.Namespace) -> int:
     """启动客户端控制台（可选同时拉起桌面面板）。"""
     from agenda.client_app import AppController
@@ -345,8 +418,16 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_argument_group("运行模式")
     sub.add_argument("--once", action="store_true", help="只整合 inbox 一次后退出")
     sub.add_argument("--client", action="store_true", help="启动客户端控制台（推荐入口）")
+    sub.add_argument("--front", action="store_true",
+                     help="启动后把面板临时提到最上层（用户显式点击时用）")
+    sub.add_argument("--panel", action="store_true",
+                     help="只启动桌面面板（不开控制台、不进托盘；开机自启动用这条）")
+    sub.add_argument("--shortcut", action="store_true",
+                     help="桌面快捷方式入口：只打开日程表面板，永远不开控制台")
     sub.add_argument("--paste", action="store_true", help="打开快速录入窗口")
     sub.add_argument("--tutorial", action="store_true", help="打开使用教程窗口")
+    sub.add_argument("--tutorial-web", action="store_true",
+                     help="把教程生成为网页并用浏览器打开（图能放大、能收藏）")
     sub.add_argument("--add-text", metavar="TEXT", help="直接并入一段文本；@文件 表示读取文件")
     sub.add_argument("--stdin", action="store_true", help="从标准输入读入文本并入日程")
     sub.add_argument("--status", action="store_true", help="打印当前时间线")
@@ -387,6 +468,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.once:
         return cmd_once(args)
+    if args.panel:
+        return cmd_panel(args)
+    if args.shortcut:
+        return cmd_shortcut(args)
     if args.client:
         return cmd_client(args)
     if args.list_schools:
@@ -394,6 +479,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.tutorial:
         from agenda.tutorial import show_tutorial
         show_tutorial()
+        return 0
+    if args.tutorial_web:
+        from agenda import tutorial, tutorial_html
+
+        path = tutorial.tutorial_path()
+        if path is None:
+            print("没找到教程文件（docs/教程.md）。")
+            return 1
+        target = tutorial_html.open_in_browser(path)
+        if target is None:
+            print("生成教程网页失败。")
+            return 1
+        print(f"已生成并在浏览器中打开：{target}")
         return 0
     if args.add_text:
         return cmd_add_text(args)

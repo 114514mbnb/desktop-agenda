@@ -151,6 +151,7 @@ def is_minimized(hwnd: int) -> bool:
 
 SW_RESTORE = 9
 SW_SHOWNOACTIVATE = 4
+SW_SHOW = 5
 
 
 def restore_window(hwnd: int, *, activate: bool = False) -> bool:
@@ -161,6 +162,60 @@ def restore_window(hwnd: int, *, activate: bool = False) -> bool:
         user32 = _user32()
         user32.ShowWindow(wintypes.HWND(hwnd),
                           SW_RESTORE if activate else SW_SHOWNOACTIVATE)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def flash_window(hwnd: int, *, count: int = 3) -> bool:
+    """让任务栏上那个按钮闪几下（不抢焦点，只提醒）。
+
+    用途：用户点了托盘图标/快捷方式，我们把窗口放到最前时，如果窗口本来就
+    在最前面（或它在别的虚拟桌面上），用户可能还是"没看出发生了什么"——
+    任务栏闪一下是 Windows 上最标准的"喂，看这里"（用户点名要的：
+    「点图标的时候要把控制台窗口带到最前面，并在任务栏闪烁提醒」）。
+    """
+    if not _IS_WINDOWS or not hwnd:
+        return False
+
+    class FLASHWINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.UINT), ("hwnd", wintypes.HWND),
+                    ("dwFlags", wintypes.DWORD), ("uCount", wintypes.UINT),
+                    ("dwTimeout", wintypes.DWORD)]
+
+    try:
+        info = FLASHWINFO()
+        info.cbSize = ctypes.sizeof(FLASHWINFO)
+        info.hwnd = wintypes.HWND(hwnd)
+        # FLASHW_ALL：任务栏按钮 + 标题栏都闪；FLASHW_TIMERNOFG：闪到用户来看它为止
+        info.dwFlags = 0x00000003 | 0x0000000C
+        info.uCount = max(1, count)
+        info.dwTimeout = 0
+        return bool(_user32().FlashWindowEx(ctypes.byref(info)))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def bring_to_front(hwnd: int, *, flash: bool = True) -> bool:
+    """把窗口放到最前并（可选）让任务栏按钮闪一下。
+
+    对控制台这种**普通**窗口用的：`raise_to_top_of_normal` 只管层级，
+    不保证它真的跑到最前面（用户切到别的程序时就还在后面）。
+    """
+    if not _IS_WINDOWS or not hwnd:
+        return False
+    try:
+        user32 = _user32()
+        handle = wintypes.HWND(hwnd)
+        if is_minimized(hwnd):
+            restore_window(hwnd, activate=True)
+        user32.ShowWindow(handle, SW_SHOW)
+        user32.SetForegroundWindow(handle)
+        user32.BringWindowToTop(handle)
+        user32.SetWindowPos(handle, wintypes.HWND(HWND_TOP), 0, 0, 0, 0,
+                            SWP_NOSIZE | SWP_NOMOVE)
+        if flash:
+            flash_window(hwnd)
         return True
     except Exception:  # noqa: BLE001
         return False

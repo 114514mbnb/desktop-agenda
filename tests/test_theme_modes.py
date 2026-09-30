@@ -217,7 +217,7 @@ class PanelThemeTests(unittest.TestCase):
         from agenda.panel import AgendaPanel
 
         return AgendaPanel(Path(tmp), pipeline_ms=0, autostart_pipeline=False,
-                           window_mode="desktop")
+                           hide_past=False, window_mode="desktop")
 
     def _save(self, data: Path, **fields):
         from agenda.client_config import ClientConfig
@@ -342,7 +342,7 @@ class PanelReadabilityTests(unittest.TestCase):
         from agenda.panel import AgendaPanel
 
         return AgendaPanel(Path(tmp), pipeline_ms=0, autostart_pipeline=False,
-                           window_mode="desktop")
+                           hide_past=False, window_mode="desktop")
 
     def _visible_text_contrast(self, panel) -> list[str]:
         import tkinter as tk

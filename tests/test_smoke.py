@@ -327,6 +327,53 @@ class SmokeTests(unittest.TestCase):
         finally:
             panel_mod.AgendaPanel = real
 
+    def test_the_panel_comes_back_where_the_user_left_it(self):
+        """面板位置要**读回来**：用户拖到哪儿，重启后还在哪儿。
+
+        真踩过：`_save_geometry()` 把 panel_x/panel_y 写进 client.json，而 `cmd_run`
+        只读命令行、**从来没人读那两个值** —— 拖了半天，一重启就回到默认位置，
+        用户看到的就是"这玩意儿拖不动"。
+        """
+        import main as cli
+        from agenda.client_config import ClientConfig
+
+        captured: list[dict] = []
+
+        class FakePanel:
+            def __init__(self, data_dir, **kwargs):
+                captured.append(kwargs)
+
+            def run(self):
+                pass
+
+        import agenda.panel as panel_mod
+
+        real = panel_mod.AgendaPanel
+        panel_mod.AgendaPanel = FakePanel
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                data = Path(tmp)
+                # 没有存过位置：交给面板自己算默认位置
+                args = cli.build_parser().parse_args(["--data-dir", str(data)])
+                cli.cmd_run(args)
+                self.assertIsNone(captured[-1]["position"])
+
+                config = ClientConfig.load(data)
+                config.panel_x = 1234
+                config.panel_y = 321
+                config.save(data)
+                cli.cmd_run(args)
+                self.assertEqual(captured[-1]["position"], (1234, 321),
+                                 "client.json 里记住的位置没被采纳")
+
+                # 命令行显式给了坐标就以它为准
+                args = cli.build_parser().parse_args(
+                    ["--data-dir", str(data), "--panel-x", "10", "--panel-y", "20"])
+                cli.cmd_run(args)
+                self.assertEqual(captured[-1]["position"], (10, 20))
+        finally:
+            panel_mod.AgendaPanel = real
+
     def test_school_course_url_is_registered(self):
         """青科大的课表页地址登记在目录里，导入对话框才能自动填。"""
         from agenda import eas

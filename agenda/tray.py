@@ -32,7 +32,12 @@ WM_CLOSE = 0x0010
 WM_RBUTTONUP = 0x0205
 WM_LBUTTONDBLCLK = 0x0203
 NIM_ADD, NIM_MODIFY, NIM_DELETE = 0, 1, 2
-NIF_MESSAGE, NIF_ICON, NIF_TIP = 0x01, 0x02, 0x04
+NIF_MESSAGE, NIF_ICON, NIF_TIP, NIF_INFO = 0x01, 0x02, 0x04, 0x10
+#: 气泡提示的图标（信息 / 警告）
+NIIF_INFO, NIIF_WARNING = 0x01, 0x02
+#: Explorer 重启（或崩溃后自动重启）会广播这条消息 —— 收到就得把图标重新挂上，
+#: 否则通知区里那个图标永远消失（用户的原话："图标怎么没了？"）
+WM_TASKBARCREATED = WM_USER + 21
 MF_STRING, MF_SEPARATOR = 0x0000, 0x0800
 MFT_SEPARATOR = 0x0800
 MIIM_ID, MIIM_FTYPE, MIIM_STRING, MIIM_STATE = 0x0002, 0x0100, 0x0040, 0x0001
@@ -189,10 +194,13 @@ class TrayIcon:
 
     # -- 生命周期 --------------------------------------------------------
     def start(self) -> bool:
+        global _LAST_ICON
+
         if sys.platform != "win32":
             return False
         if self._thread is not None:
             return True
+        _LAST_ICON = self
         import threading
         self._thread = threading.Thread(target=self._run, name="tray", daemon=True)
         self._thread.start()
@@ -230,6 +238,10 @@ class TrayIcon:
             if msg == WM_CLOSE:
                 self._remove_icon(hwnd)
                 user32.DestroyWindow(hwnd)
+                return 0
+            if msg == WM_TASKBARCREATED:
+                # Explorer 重启过：图标没了，得重新挂一个
+                self._readd_icon()
                 return 0
             if msg == WM_DESTROY:
                 user32.PostQuitMessage(0)
@@ -271,6 +283,35 @@ class TrayIcon:
         while self._running and user32.GetMessageW(ctypes.byref(message), None, 0, 0) > 0:
             user32.TranslateMessage(ctypes.byref(message))
             user32.DispatchMessageW(ctypes.byref(message))
+
+    def notify(self, title: str, message: str, *, warning: bool = False) -> bool:
+        """弹一个托盘气泡（Win10/11 上显示成通知）。
+
+        用途：用户点了图标/快捷方式但**看起来什么都没发生**时给个可见回执
+        （比如"日程表已经在运行，它在屏幕右下角"）。没有这个回执，
+        用户只会得出"点了没反应"的结论。
+        """
+        if not sys.platform == "win32" or self._nid is None:
+            return False
+        nid = self._nid
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_INFO
+        nid.szInfo = message[:255]
+        nid.szInfoTitle = title[:63]
+        nid.dwInfoFlags = NIIF_WARNING if warning else NIIF_INFO
+        ok = bool(ctypes.windll.shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(nid)))
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP      # 复位，免得下次改图标时又弹一遍
+        return ok
+
+    def _readd_icon(self) -> None:
+        """Explorer 重启后把图标挂回来。"""
+        if self._nid is None:
+            return
+        nid = self._nid
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+        try:
+            ctypes.windll.shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+        except Exception:                                    # noqa: BLE001
+            pass
 
     def _load_icon(self, user32):
         if self.icon_path:
@@ -320,8 +361,21 @@ def command_ids() -> dict[str, int]:
     }
 
 
-def balloon(title: str, message: str) -> bool:
-    """托盘气泡提醒（Windows 10/11 会显示为通知）。"""
-    if sys.platform != "win32":
+#: 最近创建的那个托盘图标；模块级 `balloon()` 转发到它（老调用点还在用）。
+_LAST_ICON = None
+
+
+def last_icon():
+    return _LAST_ICON
+
+
+def balloon(title: str, message: str, *, warning: bool = False) -> bool:
+    """托盘气泡提醒（Windows 10/11 会显示为通知）。
+
+    ⚠ 这里以前是**空壳**：`return True` 但什么都不做 —— 调用方以为提示发出去了，
+    用户什么都没看到。现在转发给当前那个图标，没有图标就老实返回 False。
+    """
+    icon = _LAST_ICON
+    if icon is None:
         return False
-    return True
+    return icon.notify(title, message, warning=warning)

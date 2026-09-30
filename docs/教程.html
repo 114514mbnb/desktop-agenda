@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>桌面日程 · 使用教程</title>
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; padding: 32px 16px 80px;
+  background: #0B0F16; color: #DCE6F5;
+  font-family: "Microsoft YaHei UI", "PingFang SC", system-ui, sans-serif;
+  line-height: 1.75; font-size: 15px;
+}
+.wrap { max-width: 980px; margin: 0 auto; }
+h1 { font-size: 26px; margin: 0 0 6px; }
+.lead { color: #9FB0C7; margin: 0 0 26px; }
+.card {
+  background: #151C28; border: 1px solid #26303F; border-radius: 12px;
+  padding: 18px 22px 22px; margin: 0 0 22px;
+}
+.card > h2 {
+  font-size: 19px; margin: 0 0 12px; padding-bottom: 10px;
+  border-bottom: 1px solid #26303F; color: #7FB0FF;
+}
+h3 { font-size: 16px; margin: 22px 0 8px; color: #DCE6F5; }
+p { margin: 10px 0; }
+ul { margin: 8px 0 8px 4px; padding-left: 22px; }
+li { margin: 5px 0; }
+code {
+  background: #0B0F16; border: 1px solid #26303F; border-radius: 5px;
+  padding: 1px 5px; font-family: Consolas, monospace; font-size: 13px; color: #8BD5A0;
+}
+pre {
+  background: #0B0F16; border: 1px solid #26303F; border-radius: 8px;
+  padding: 12px 14px; overflow-x: auto;
+}
+pre code { border: 0; background: none; padding: 0; }
+table { border-collapse: collapse; margin: 12px 0; width: 100%; font-size: 14px; }
+th, td { border: 1px solid #26303F; padding: 7px 10px; text-align: left; vertical-align: top; }
+th { background: #1B2431; color: #DCE6F5; }
+blockquote {
+  margin: 12px 0; padding: 10px 14px; border-left: 3px solid #4C8DFF;
+  background: #121926; color: #9FB0C7;
+}
+figure { margin: 18px 0; text-align: center; }
+figure img {
+  max-width: 100%; border: 1px solid #26303F; border-radius: 10px; cursor: zoom-in;
+}
+figure figcaption { color: #78899F; font-size: 13px; margin-top: 8px; }
+hr { border: 0; border-top: 1px solid #26303F; margin: 4px 0 20px; }
+.tip { color: #78899F; font-size: 13px; }
+a { color: #7FB0FF; }
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>桌面日程 · 使用教程</h1>
+<p class="lead"><strong>一句话</strong>：它把 QQ 群里的通知和你的课表，合成桌面右边那条时间线。</p>
+<p>全部在本机完成，<strong>不联网、不要账号密码、不读聊天记录</strong>。</p>
+<figure><img src="images/01-面板总览.png" alt="面板长这样：上面是时间，下面是按天排的课和通知"><figcaption>面板长这样：上面是时间，下面是按天排的课和通知</figcaption></figure>
+<hr>
+<section class="card" id="目录"><h2>目录</h2><p class="tip">点下面的章节名可直接跳到那一章；图点一下能放大，整页可以收藏。</p></section>
+<ul>
+<li>1. <a href="#1-它是干什么的">它是干什么的</a></li>
+<li>2. <a href="#2-五分钟上手">五分钟上手</a></li>
+<li>3. <a href="#3-桌面面板怎么用">桌面面板怎么用</a></li>
+<li>4. <a href="#4-把课表导进来">把课表导进来</a></li>
+<li>5. <a href="#5-把群通知加进来五种方式">把群通知加进来（五种方式）</a></li>
+<li>6. <a href="#6-处理单条日程右键">处理单条日程：右键</a></li>
+<li>7. <a href="#7-上课时间与节数">上课时间与节数</a></li>
+<li>8. <a href="#8-假期调休与节日彩蛋">假期、调休与节日彩蛋</a></li>
+<li>9. <a href="#9-设置项逐个说明">设置项逐个说明</a></li>
+</ul>
+<p>10. <a href="#10-窗口找不到了怎么办">窗口找不到了怎么办</a></p>
+<p>11. <a href="#11-数据在哪怎么备份怎么恢复">数据在哪、怎么备份、怎么恢复</a></p>
+<p>12. <a href="#12-常见问题">常见问题</a></p>
+<p>13. <a href="#13-命令行参数">命令行参数</a></p>
+<hr>
+<section class="card" id="1-它是干什么的"><h2>1. 它是干什么的</h2>
+<p>它干两件事：</p>
+<table><thead><tr>
+<th>它做的</th>
+<th>说明</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>把群通知变成日程</strong></td>
+<td>粘一段群消息进来，它自动认出时间、地点、人员、备注，排进时间线，一周内自动去重</td>
+</tr>
+<tr>
+<td><strong>把课表铺到每一天</strong></td>
+<td>导入课表文件（WakeUp <code>.ics</code>、教务 PDF、网页、CSV 都行），按上课时间展开到每一天</td>
+</tr>
+</tbody></table>
+<p>它<strong>不做</strong>这些：</p>
+<ul>
+<li>- 不读 QQ 聊天记录（QQ 没有开放接口，所以通知靠你粘、拖、或按热键录）</li>
+<li>- 不碰教务账号密码（课表靠<strong>文件</strong>识别）</li>
+<li>- 不联网</li>
+</ul>
+<h3>三个窗口，认清它们</h3>
+<table><thead><tr>
+<th>窗口</th>
+<th>长什么样</th>
+<th>干什么</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>日程表</strong>（也叫"面板"）</td>
+<td>桌面右边那条，一直待着</td>
+<td>看日程、处理单条日程</td>
+</tr>
+<tr>
+<td><strong>控制台</strong></td>
+<td>点面板右下角齿轮才出来</td>
+<td>改设置、导课表、录通知</td>
+</tr>
+<tr>
+<td><strong>教程</strong>（就是这个窗）</td>
+<td>你现在看的</td>
+<td>说明文档，能搜索</td>
+</tr>
+<h3>记住这三件事，就不会懵</h3>
+</tbody></table>
+<ul>
+<li>1. <strong>双击桌面「桌面日程」只会打开日程表</strong>，不会弹控制台。</li>
+<li>2. <strong>要改设置就点日程表右下角那个小齿轮</strong>（下面有特写图）。</li>
+<li>3. <strong>关掉控制台窗口不等于关掉日程表</strong>。关掉只是把它收到托盘，日程表照常在。</li>
+</ul>
+<p>看不懂命令行、忘了某个按钮在哪？控制台<strong>顶栏</strong>就有一个 <strong>「使用教程」</strong> 按钮（一点就开）；</p>
+<p>「设置」页 <strong>「帮助」</strong> 那一块也有 <strong>「查看使用教程」</strong>，</p>
+<p>随时能把这份文档打开（能搜索、能跳章节）。</p>
+<p><strong>想要更大更清楚的图、或者想收藏这一页</strong>：教程窗右上角点 <strong>「在浏览器打开」</strong> ——</p>
+<p>它会生成 <code>docs/教程.html</code> 并用系统浏览器打开，那版每章是一张卡片、<strong>图可以点开放大</strong>，</p>
+<p>也能用浏览器的收藏与页内查找（Ctrl+F）。</p>
+<hr>
+</section>
+<section class="card" id="2-五分钟上手"><h2>2. 五分钟上手</h2>
+<h3>第一步：打开</h3>
+<p>双击桌面上的 <strong>「桌面日程」</strong>。桌面右边会出现那条日程表。</p>
+<figure><img src="images/02-齿轮.png" alt="面板右下角的小齿轮，点它打开设置"><figcaption>面板右下角的小齿轮，点它打开设置</figcaption></figure>
+<p>点那个齿轮，菜单第一项就是 <strong>「日程表设置…」</strong>：它会把控制台叫出来，并直接停在「设置」页。</p>
+<h3>第二步：把课表导进来</h3>
+<ul>
+<li>1. 点齿轮 → 控制台出现，停在<strong>「课程表」</strong>页</li>
+<li>2. 点 <strong>「从文件识别课表…」</strong>，选你的课表文件</li>
+<li>3. 弹出<strong>确认窗</strong>，核对一遍 → 点 <strong>「确认导入」</strong></li>
+</ul>
+<figure><img src="images/05-控制台-课程表.png" alt="课程表页：导入课表的几条路"><figcaption>课程表页：导入课表的几条路</figcaption></figure>
+<p>详细操作见 <a href="#4-把课表导进来">第 4 节</a>。</p>
+<h3>第三步：把通知加进来</h3>
+<p>最快的办法：<strong>在 QQ 里选中那条通知文字，按一下热键</strong>（默认 <code>Ctrl+Alt+Q</code>）。</p>
+<p>面板底部会告诉你了什么。</p>
+<figure><img src="images/13-热键反馈.png" alt="按热键之后，底部那行就是反馈"><figcaption>按热键之后，底部那行就是反馈</figcaption></figure>
+<p>其他办法见 <a href="#5-把群通知加进来五种方式">第 5 节</a>。</p>
+<h3>第四步：设成开机自启（可选）</h3>
+<p>控制台 →「设置」→ 勾上 <strong>「开机后自动打开日程表面板」</strong>。以后开机它就自己出来。</p>
+<blockquote>只想在需要时手动开：双击项目目录里的 <code>start-panel.cmd</code>。</blockquote>
+<hr>
+</section>
+<section class="card" id="3-桌面面板怎么用"><h2>3. 桌面面板怎么用</h2>
+<h3>从上到下是什么</h3>
+<table><thead><tr>
+<th>位置</th>
+<th>是什么</th>
+</tr></thead><tbody>
+<tr>
+<td>顶部大数字</td>
+<td>现在几点</td>
+</tr>
+<tr>
+<td>下面一行</td>
+<td>今天几号、第几教学周（假期另说）</td>
+</tr>
+<tr>
+<td>再下面一行</td>
+<td><strong>下一项</strong>：最近的一件事还有多久</td>
+</tr>
+<tr>
+<td>中间</td>
+<td>按天分组：每天有哪些课、哪些通知</td>
+</tr>
+<tr>
+<td>最下面一行</td>
+<td>状态：今天几节课、几条通知、上次整合时间；临时提示也在这儿</td>
+</tr>
+<tr>
+<td>右下角</td>
+<td><strong>齿轮</strong> = 打开设置</td>
+</tr>
+<h3>能做的操作</h3>
+<tr>
+<td>想干什么</td>
+<td>怎么做</td>
+</tr>
+<tr>
+<td>看某条的全文</td>
+<td><strong>双击</strong>那张卡片</td>
+</tr>
+<tr>
+<td>选中某条</td>
+<td><strong>单击</strong>卡片任意位置；再点一下取消</td>
+</tr>
+<tr>
+<td>处理某条</td>
+<td><strong>右键</strong>那张卡片 → 菜单（见 <a href="#6-处理单条日程右键">第 6 节</a>）</td>
+</tr>
+<tr>
+<td>翻页</td>
+<td>滚轮，或拖右边那条细滚动条</td>
+</tr>
+<tr>
+<td>移动面板</td>
+<td>按住<strong>顶部标题区</strong>或<strong>面板空白处</strong>拖动。松手就记住位置，下次启动还在那儿</td>
+</tr>
+<tr>
+<td>改宽度</td>
+<td>拖右下角，或拖右侧/下侧的隐藏边缘</td>
+</tr>
+<tr>
+<td>打开设置</td>
+<td>点右下角 <strong>⚙</strong></td>
+</tr>
+<tr>
+<td>全局菜单</td>
+<td>在面板<strong>空白处</strong>右键</td>
+</tr>
+<h3>面板上几条规矩</h3>
+</tbody></table>
+<ul>
+<li>- <strong>时间线永远从最上面开始</strong>：最早的在最上，不会停在中间。</li>
+<li>- <strong>只显示有安排的日子</strong>：某天既没课也没通知就不占地方（今天例外，它是锚点）。</li>
+</ul>
+<p>  一周都没安排时，只画一句 <strong>「暂无日程安排」</strong>。</p>
+<ul>
+<li>- <strong>过期的通知自动让位</strong>：时间过了的群通知不再占版面；<strong>课程不受影响</strong>（上午的课下午还要回看）。</li>
+<li>- <strong>「下一项」显示完整</strong>：一行放不下就折行，不把标题切一半。</li>
+<li>- <strong>面板不会因为什么而消失</strong>：点"显示桌面"、按 <code>Win+D</code> 都不消失；只有全屏应用（游戏/视频）在前台时会临时隐身，切回来自动回来；或者你自己右键「收起面板」。</li>
+</ul>
+<hr>
+</section>
+<section class="card" id="4-把课表导进来"><h2>4. 把课表导进来</h2>
+<p>控制台 →「课程表」页。</p>
+<h3>4.1 从文件识别（推荐）</h3>
+<p>点 <strong>「从文件识别课表…」</strong>，可以多选。认得的格式：</p>
+<table><thead><tr>
+<th>后缀</th>
+<th>从哪来</th>
+</tr></thead><tbody>
+<tr>
+<td><code>.ics</code></td>
+<td>WakeUp 课程表 → 导出（<strong>最准</strong>，含绝对日期）</td>
+</tr>
+<tr>
+<td><code>.pdf</code></td>
+<td>教务系统打印/导出的课表</td>
+</tr>
+<tr>
+<td><code>.html</code> <code>.htm</code></td>
+<td>课表网页"另存为"</td>
+</tr>
+<tr>
+<td><code>.csv</code> <code>.tsv</code></td>
+<td>Excel / WPS / WakeUp 模板</td>
+</tr>
+<tr>
+<td><code>.json</code></td>
+<td>本程序自己的 <code>timetable.json</code></td>
+</tr>
+<tr>
+<td><code>.txt</code> <code>.md</code></td>
+<td>直接复制出来的课表文字</td>
+</tr>
+<h3>4.2 确认这一步不能跳过</h3>
+</tbody></table>
+<p>识别只是"猜"，所以程序<strong>不会直接覆盖</strong>你的课表，而是先弹确认窗给你看。</p>
+<figure><img src="images/09-课表确认.png" alt="确认窗：先核对，再导入"><figcaption>确认窗：先核对，再导入</figcaption></figure>
+<table><thead><tr>
+<th>要改什么</th>
+<th>怎么改</th>
+</tr></thead><tbody>
+<tr>
+<td>某一格写错了</td>
+<td><strong>双击那一格</strong>，就地改</td>
+</tr>
+<tr>
+<td>多了一行</td>
+<td>选中这行按 <code>Delete</code>，或点「删除所选」</td>
+</tr>
+<tr>
+<td>少了一行</td>
+<td>点「新增一行」</td>
+</tr>
+<tr>
+<td>全都认错了</td>
+<td>点「重新识别」</td>
+</tr>
+<tr>
+<td>不想导了</td>
+<td>点「取消」或按 <code>Esc</code>——课表<strong>一个字都不会变</strong></td>
+</tr>
+</tbody></table>
+<p>窗口上方有个 <strong>「第 1 教学周周一」</strong>，<strong>周次是按它算的</strong>。</p>
+<p>教务写"第 4 周"、程序算成"第 3 周"？改这一个框就对齐了，不用逐行改。</p>
+<h3>4.3 粘贴课表</h3>
+<p>点 <strong>「粘贴课表…」</strong>：从 Excel / WPS / 网页 / 教务复制的表格文本或整页 HTML 都认，</p>
+<p>一样会过确认窗。</p>
+<h3>4.4 手动增删改</h3>
+<ul>
+<li>- <strong>「新增课程」</strong>：填课程名、星期、节次（如 <code>3-4</code>）、地点、老师、周次</li>
+<li>- 课程列表里<strong>双击</strong>任意一条就能改</li>
+<li>- 选中后按 <code>Delete</code> 删除</li>
+<li>- <strong>「清空课程表」</strong>：清空全部（会自动备份，能「撤销上次导入」）</li>
+</ul>
+<h3>4.5 导出回手机</h3>
+<p>点 <strong>「导出 WakeUp CSV」</strong>，把生成的文件发到手机上，用 WakeUp 的"excel导入"打开。</p>
+<h3>4.6 导入后跑一次「课表体检」</h3>
+<p>识别偏差不会报错，只会安静地少一门课、把周次读成节次。点 <strong>「课表体检」</strong>，</p>
+<p>它把可疑之处一次列出来，分 <strong>✗ 问题</strong> 和 <strong>⚠ 建议核对</strong> 两级。</p>
+<p>它能查：节次超出上课时间表、结束节次小于开始节次、同一时段两门课、课名里混进教务字段、</p>
+<p>周次异常、完全重复的行、同一门课同时有单周和双周、缺地点/教师/周次、没设「第 1 教学周周一」。</p>
+<p>结果窗可以<strong>复制报告</strong>或<strong>保存为文件</strong>。体检<strong>只检查，不会自动修改课表</strong>。</p>
+<h3>周次怎么写</h3>
+<table><thead><tr>
+<th>写法</th>
+<th>意思</th>
+</tr></thead><tbody>
+<tr>
+<td><code>1-16</code></td>
+<td>第 1 到 16 周，每周都上</td>
+</tr>
+<tr>
+<td><code>1-5、7-11单</code></td>
+<td>1~5 周，加上 7~11 周的<strong>单周</strong></td>
+</tr>
+<tr>
+<td><code>2-8双</code></td>
+<td>2~8 周的<strong>双周</strong></td>
+</tr>
+<tr>
+<td>留空</td>
+<td>每周都上</td>
+</tr>
+<hr>
+</table>
+</section>
+<section class="card" id="5-把群通知加进来五种方式"><h2>5. 把群通知加进来（五种方式）</h2>
+<p>五条路，挑一条顺手的。</p>
+<h3>方式一：把消息文件拖到面板上（最省事）</h3>
+<p>把 QQ 导出的消息存成 <code>.txt</code>，<strong>直接拖到桌面面板上</strong>：</p>
+<ul>
+<li>- 底部显示「通知 N 条新增」</li>
+<li>- 时间线立刻刷新</li>
+<li>- 拖<strong>整个文件夹</strong>也行，会递归找里面的文本文件</li>
+<li>- 拖 <code>.ics</code> / <code>.pdf</code> 会按课表识别</li>
+<li>- 拖别的文件 → 底部说认不出来，什么都不改</li>
+</ul>
+<p>QQ 导出的文件常是 GBK 编码，<strong>也认</strong>。</p>
+<h3>方式二：粘贴（最直接）</h3>
+<p>控制台 →「通知」页 → 把群消息粘到上面那个大框 → 点 <strong>「保存并刷新」</strong>。</p>
+<figure><img src="images/04-控制台-通知.png" alt="通知页：粘上面，看中间，点右边保存"><figcaption>通知页：粘上面，看中间，点右边保存</figcaption></figure>
+<ul>
+<li>- 一次可以粘<strong>多条</strong>，用空行或 <code>[群名]</code> 开头分隔</li>
+<li>- 「来源群名」可填可不填（消息里写了 <code>[群名]</code> 就以它为准）</li>
+<li>- 粘完约 1 秒下面出现识别结果，<strong>可以逐条改</strong></li>
+<li>- 填完按 <code>Ctrl+Enter</code> 也能保存</li>
+<li>- 右边还有 <strong>「清空通知」</strong>（清掉全部）和「撤销上一条」</li>
+</ul>
+<h3>方式三：快速录入小窗</h3>
+<p>面板空白处右键 →「快速录入群消息…」：叫出一个小窗，粘上就能存。</p>
+<h3>方式四：剪贴板全局热键（最快）</h3>
+<p><strong>在 QQ 里选中通知文字，直接按热键</strong>（默认 <code>Ctrl+Alt+Q</code>）。不用先按 <code>Ctrl+C</code>。</p>
+<p>程序会：读到选中的文字 → 解析 → 入库 → 在面板底部告诉你了什么（见上面那张图）。</p>
+<ul>
+<li>- <strong>抓不到选中内容时会退回读剪贴板</strong>，并在提示里写明「来自剪贴板（没抓到选中的文字）」，免得你以为识别错了。</li>
+<li>- <strong>终端窗口会自动跳过</strong>（那里 <code>Ctrl+C</code> 是中断信号，可能打断你正在跑的命令）。</li>
+<li>- <strong>改热键</strong>：控制台 →「设置」→「剪贴板热键」→ 在输入框里<strong>直接按下想用的组合</strong> → 点「检测并保存」。<strong>不用重启面板</strong>。</li>
+<li>- <strong>组合规则</strong>：必须带 <code>Ctrl</code> / <code>Alt</code> / <code>Win</code> 中至少一个。只带 <code>Shift</code> 的（比如 <code>Shift+Z</code>）会被拒绝——你一打大写字母就会触发它。</li>
+<li>- <strong>冲突检测</strong>：保存前会试登记一次；被别的程序占了会直接说「这个组合已经被别的程序占用了」，不会出现"保存成功但按下没反应"。</li>
+<li>- <strong>热键由日程表注册</strong>：面板没在跑时热键不可用（设置页会提示）。</li>
+</ul>
+<h3>方式五：收件箱（批量/自动）</h3>
+<p>把 <code>.txt</code> 丢进 <code>data\inbox\</code>，然后：</p>
+<ul>
+<li>- 等面板自动整合（默认每 15 分钟），或</li>
+<li>- 面板右键 →「立即整合群通知」，或</li>
+<li>- 跑一次 <code>run-daily.cmd</code></li>
+</ul>
+<p>整合过的文件自动移到 <code>data\archive\</code>。</p>
+<p>（文件名里有 <code>示例</code>/<code>demo</code>/<code>sample</code>/<code>test</code> 的会被跳过。）</p>
+<h3>通知怎么写才认得出</h3>
+<p>这样写最准：</p>
+</section>
+<pre><code>
+[群名]
+通知：9月25日 14:00-15:30 在3号楼201会议室召开班级例会，负责人：张伟老师，请携带笔记本。
+</code></pre>
+<table><thead><tr>
+<th>字段</th>
+<th>支持的写法</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>日期</strong></td>
+<td>今天 / 明天 / 后天 / 这周五 / 下周三 / 周五 / 9月25日 / 9/25 / 2026-09-25</td>
+</tr>
+<tr>
+<td><strong>时段</strong></td>
+<td>14:00-15:30、14点到15:30、下午3点到5点、上午9点、<strong>今天中午12:00前</strong></td>
+</tr>
+<tr>
+<td><strong>地点</strong></td>
+<td>在3号楼201会议室、实验楼B302、三教302、腾讯会议、线上</td>
+</tr>
+<tr>
+<td><strong>人员</strong></td>
+<td>负责人：张伟老师、@王强、联系人：陈静、由X负责</td>
+</tr>
+<tr>
+<td><strong>备注</strong></td>
+<td><code>备注：…</code>、<code>请携带…</code>、<code>请提前…</code> 后面的整句</td>
+</tr>
+</tbody></table>
+<p><strong>完全没写日期的</strong>：按粘贴当天归档，并标红「日期待确认」——它不猜。</p>
+<p><strong>写了区间又写了「每日」的</strong>（例：<code>9月25日-28日期间，每日上午11:00前统计…</code>）：</p>
+<p>只记<strong>一条</strong>，落在区间的<strong>最后一天</strong>，备注写明「连续事项：09月25日–09月28日 每日（09月28日 截止）」。</p>
+<p>不摊成 4 条，是因为这类事本质上是"一条有截止日的事"，摊开会把空闲日子填满同名卡片。</p>
+<hr>
+<section class="card" id="6-处理单条日程右键"><h2>6. 处理单条日程：右键</h2>
+<p><strong>右键面板上任意一张卡片</strong>（控制台「通知」页下面的列表也行）：</p>
+<table><thead><tr>
+<th>菜单项</th>
+<th>做什么</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>编辑此条通知…</strong></td>
+<td>手动改识别结果：标题 / 日期 / 开始 / 结束 / 地点 / 人员 / 备注</td>
+</tr>
+<tr>
+<td><strong>选中此条（下次按热键 = 补充备注）</strong></td>
+<td>之后按热键拿到的那段文字，会并进这条的备注，而不是新建一条</td>
+</tr>
+<tr>
+<td><strong>标记为已完成</strong></td>
+<td>事办完了，这条从日程里消失</td>
+</tr>
+<tr>
+<td><strong>修改结束时间…</strong></td>
+<td>弹出小窗，时 / 分各一个下拉框</td>
+</tr>
+<tr>
+<td><strong>复制内容</strong></td>
+<td>标题 / 时间 / 地点 / 人员 / 备注一行进剪贴板</td>
+</tr>
+<tr>
+<td><strong>删除此条…</strong></td>
+<td>彻底删除（会先确认一次）</td>
+</tr>
+</tbody></table>
+<p>细节：</p>
+<ul>
+<li>- <strong>通知</strong>：编辑、改结束时间直接写进 <code>events.json</code>；标记为已完成或删除即从日程里移除</li>
+<li>- <strong>课程</strong>：改结束时间只给<strong>这一条</strong>记一个覆盖值，<strong>不动全校课时表</strong></li>
+<li>- 课程的「编辑此条通知…」是灰的，请到控制台「课程表」页改</li>
+<li>- 手动改过的日期会被标成"人工确认"，自动加的「日期待确认」随之消失</li>
+</ul>
+<h3>6.1 群通知的&quot;补充消息&quot;怎么并到原通知上</h3>
+<p>群里的通知常常不止一条：正主发一条，后面又追一句「地点改到 302」。</p>
+<p>做法：<strong>先点一下那条通知的卡片</strong>（边框变蓝＝已选中），<strong>再按热键</strong>。</p>
+<figure><img src="images/10-选中卡片.png" alt="选中之后，底部会写明选中了哪一条"><figcaption>选中之后，底部会写明选中了哪一条</figcaption></figure>
+<ul>
+<li>- 补充内容<strong>原样</strong>并进去，原来的备注不会被冲掉</li>
+<li>- 短句用「；」接在后面，多行或较长的补充另起一行</li>
+<li>- <strong>再点一下同一张卡片就取消选中</strong>（跟着开的详情窗也会一起关掉）</li>
+<li>- 这条规则<strong>只对通知生效</strong>：课程卡片点不上（会明确提示）</li>
+</ul>
+<h3>6.2 改一条通知长什么样</h3>
+<figure><img src="images/12-编辑通知.png" alt="编辑窗：七个字段，改完保存立即生效"><figcaption>编辑窗：七个字段，改完保存立即生效</figcaption></figure>
+<p>日期用的是三段输入框（年 / 月 / 日各一格），中间那个短横线是<strong>分隔符，删不掉</strong>。</p>
+<p>填错不会关窗，下面用红字说明哪里不对。</p>
+<hr>
+</section>
+<section class="card" id="7-上课时间与节数"><h2>7. 上课时间与节数</h2>
+<p>控制台 →「上课时间」页。</p>
+<figure><img src="images/06-控制台-上课时间.png" alt="上课时间页"><figcaption>上课时间页</figcaption></figure>
+<table><thead><tr>
+<th>项</th>
+<th>说明</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>一共几节课</strong></td>
+<td>1~24 节，改完点「套用节数」，下面的输入框会重排（<strong>已填的时间会带过去</strong>）</td>
+</tr>
+<tr>
+<td>每节的开始 / 结束</td>
+<td>时、分各一个下拉框，<strong>不用打冒号</strong></td>
+</tr>
+<tr>
+<td><strong>学期开始（第 1 周周一）</strong></td>
+<td>三段式日期框；周次按它算；填成非周一会被提示并自动校准</td>
+</tr>
+<tr>
+<td><strong>保存课时</strong></td>
+<td>保存并让面板按新时间重排</td>
+</tr>
+<tr>
+<td><strong>恢复默认时间</strong></td>
+<td>回到内置课时</td>
+</tr>
+<tr>
+<td><strong>每节课时长相同</strong></td>
+<td>按第一节的时长把后面每节推平</td>
+</tr>
+</tbody></table>
+<p>写错了会被拦住：下课时间不早于上课时间、中间不能空一节。</p>
+<hr>
+</section>
+<section class="card" id="8-假期调休与节日彩蛋"><h2>8. 假期、调休与节日彩蛋</h2>
+<p>控制台 →「假期」页。这一页解决三件事：<strong>放假不排课</strong>、<strong>调休要补课</strong>、<strong>过节有点气氛</strong>。</p>
+<figure><img src="images/07-控制台-假期.png" alt="假期页：上面是假期，下面是调休"><figcaption>假期页：上面是假期，下面是调休</figcaption></figure>
+<h3>8.1 假期：这几天不排课，但群通知照收</h3>
+<table><thead><tr>
+<th>字段</th>
+<th>说明</th>
+</tr></thead><tbody>
+<tr>
+<td>名称</td>
+<td>只是给你自己看的标签。<strong>节日彩蛋按日期判定，不认这个名字</strong></td>
+</tr>
+<tr>
+<td>开始 / 结束</td>
+<td>三段式日期输入</td>
+</tr>
+</tbody></table>
+<p>假期里<strong>一门课都不排</strong>，但<strong>群通知照常显示</strong>——放假期间老师照样发通知，这条是特意要的。</p>
+<p>假期表有一列<strong>状态</strong>：<code>未开始</code> / <code>进行中</code> / <code>收尾中</code> / <code>已结束</code>。</p>
+<p>假期到点<strong>自动失效</strong>，不用手动删；历史条目可以用「清理已结束」一键收掉。</p>
+<p>四个按钮：</p>
+<table><thead><tr>
+<th>按钮</th>
+<th>做什么</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>新增假期</strong></td>
+<td>手动加一段；双击表格里的行也能改</td>
+</tr>
+<tr>
+<td><strong>按节日预填…</strong></td>
+<td>按"节日当天 + 常见连休天数"铺一份<strong>草稿</strong>（结果是推算，<strong>以学校通知为准</strong>）</td>
+</tr>
+<tr>
+<td><strong>从放假通知识别…</strong></td>
+<td>把放假通知<strong>原文</strong>粘进去，自动识别假期区间与调休日</td>
+</tr>
+<tr>
+<td><strong>清理已结束</strong></td>
+<td>把已经过去的假期删掉</td>
+</tr>
+<h3>8.2 假期结束后的收心倒计时</h3>
+</tbody></table>
+<p>假期一结束，面板自动回到正常排课；<strong>紧接着的三天</strong>会在日期下方多一条提示：</p>
+</section>
+<pre><code>
+✦ 国庆节假期已结束 · 收心倒计时 3 天
+</code></pre>
+<p>第四天起自动消失。</p>
+<h3>8.3 调休：那一天补哪一天的课</h3>
+<p>调休窗是"一行一组"：左边<strong>调休日</strong>（当天要上课），右边<strong>补课日期</strong>（补哪一天）。</p>
+<p>例：<code>10月10日（周六）补 10月7日（周三）的课</code>。</p>
+<p>面板那天的日期旁边会多一行小字：</p>
+<pre><code>
+今天 10/10 周六   调休10月7日日程        4 节课
+</code></pre>
+<p>这行字默认是 <strong>「调休X月X日日程」</strong> 的格式，也能自己在窗里改成别的说法。</p>
+<h3>8.4 节日彩蛋</h3>
+<p><strong>触发条件</strong>（越靠前越优先）：</p>
+<ul>
+<li>1. 节日当天</li>
+<li>2. <code>data\calendar.json</code> 里<strong>包含这个节日日期</strong>的假期区间内</li>
+<li>3. 节日<strong>前后各 3 天</strong></li>
+<li>4. 假期刚结束的收尾期</li>
+</ul>
+<p><strong>只看日期，不看假期叫什么名字</strong>：你把假期写成「中秋国庆连放」也好、改成「放假」也好，</p>
+<p>效果完全一样。</p>
+<p>一个区间里包含多个节日时（典型是两个节并成一条），<strong>按各节日自己的天数分段</strong>：</p>
+<table><thead><tr>
+<th>日期</th>
+<th>面板</th>
+</tr></thead><tbody>
+<tr>
+<td>9/22–9/24</td>
+<td>中秋节（还有 3/2/1 天）</td>
+</tr>
+<tr>
+<td>9/25</td>
+<td>中秋节</td>
+</tr>
+<tr>
+<td>9/26–9/30</td>
+<td><strong>没有彩蛋</strong>（中秋已过、国庆未到）</td>
+</tr>
+<tr>
+<td>10/1–10/7</td>
+<td>国庆节</td>
+</tr>
+<tr>
+<td>10/8–10/10</td>
+<td>国庆节（收心倒计时）</td>
+</tr>
+</tbody></table>
+<p>有彩蛋的日子，面板顶部会多一条横幅：节日配色 + 装饰 + 一句祝福。</p>
+<p><strong>点一下横幅</strong>展开该节日的彩蛋文案（再点收起）。面板边框也会换成节日主色并慢慢"呼吸"。</p>
+<p>彩蛋覆盖 <strong>农历 1900–2100 年</strong>（春节、元宵、端午、中秋按农历，清明按节气，</p>
+<p>由随程序附带的农历库算）。</p>
+<h3>8.5 面板上跟日期有关的两处</h3>
+<ul>
+<li>- 顶部日期行<strong>带年份</strong>：<code>2026年9月25日 周五 · 第 3 教学周</code></li>
+<li>- 跨年期间写成 <code>2027/1/1</code>，年份一目了然</li>
+</ul>
+<hr>
+<section class="card" id="9-设置项逐个说明"><h2>9. 设置项逐个说明</h2>
+<p>控制台 →「设置」页。<strong>这一页只有功能名称</strong>，说明都在这儿。</p>
+<figure><img src="images/08-控制台-设置.png" alt="设置页：只有功能名称"><figcaption>设置页：只有功能名称</figcaption></figure>
+<table><thead><tr>
+<th>设置</th>
+<th>说明</th>
+<th>建议</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>启动时显示桌面面板</strong></td>
+<td>下次启动是否自动拉起面板</td>
+<td>开</td>
+</tr>
+<tr>
+<td><strong>到点弹窗提醒</strong></td>
+<td>事项开始前弹个小窗</td>
+<td>开</td>
+</tr>
+<tr>
+<td><strong>待机模式</strong></td>
+<td><strong>智能隐身</strong>＝检测到全屏应用（游戏/视频）时自动让位，切回桌面立刻恢复；<strong>常驻待机</strong>＝全屏时面板也不隐藏，一直在屏幕上</td>
+<td>智能隐身</td>
+</tr>
+<tr>
+<td><strong>剪贴板热键</strong></td>
+<td>是否启用、用哪个组合；「按热键时优先识别「选中的文字」」关掉后只读剪贴板</td>
+<td>开，<code>Ctrl+Alt+Q</code></td>
+</tr>
+<tr>
+<td><strong>面板主题</strong></td>
+<td>三选一，见下</td>
+<td>经典深色</td>
+</tr>
+<tr>
+<td><strong>开机自启动</strong></td>
+<td>勾上＝登录后自动打开日程表<strong>面板</strong>（不开控制台）</td>
+<td>按需</td>
+</tr>
+<tr>
+<td><strong>保存设置</strong></td>
+<td>改完点它</td>
+<td>—</td>
+</tr>
+<h3>9.1 面板主题（三种）</h3>
+<tr>
+<td>模式</td>
+<td>效果</td>
+</tr>
+<tr>
+<td><strong>经典深色</strong></td>
+<td>固定配色，不随时间变化（默认）</td>
+</tr>
+<tr>
+<td><strong>随时刻</strong></td>
+<td>配色跟着天色走：清晨（05–09）/ 白天（09–17）/ 黄昏（17–20）/ 深夜（20–05）四套，跨过时段自己换</td>
+</tr>
+<tr>
+<td><strong>我的照片</strong></td>
+<td>用你自己的照片：照片铺在面板顶部，整套配色由照片取色生成，<strong>文字颜色按背景明暗自动切换</strong></td>
+</tr>
+<figure><img src="images/03-照片主题.png" alt="我的照片：照片在顶部，字压在照片上"><figcaption>我的照片：照片在顶部，字压在照片上</figcaption></figure>
+</tbody></table>
+<p><strong>换照片</strong>：「我的照片」→「选择照片…」→ 选文件 → <strong>框选显示范围</strong> → 保存。</p>
+<p>支持 JPG / PNG / BMP / GIF，会转存到 <code>data\theme\</code> 下，<strong>不引用原图</strong>（原图挪走也没事）。</p>
+<figure><img src="images/11-框选照片.png" alt="框选：想要哪一块就框哪一块"><figcaption>框选：想要哪一块就框哪一块</figcaption></figure>
+<ul>
+<li>- 框的宽高比<strong>按面板锁死</strong>，所以你框到的就是最终看到的那一条</li>
+<li>- 框<strong>外面</strong>拖＝重画；框<strong>里面</strong>拖＝平移；「居中」回到最大居中框</li>
+<li>- 想用整张就点「用整张照片」</li>
+<li>- 选过之后随时能点 <strong>「调整照片范围…」</strong> 重框（程序留了一份未裁的原图）</li>
+<li>- <strong>「清除照片」</strong> 移除</li>
+</ul>
+<h3>9.2 开机自启动</h3>
+<p>勾上 <strong>「开机后自动打开日程表面板」</strong>，立刻生效，不用保存、不用重启。</p>
+<p><strong>只开面板，不开控制台</strong>——这条是固定的，界面上没有开关。</p>
+<p>（登录后只出现桌面右边那条日程表；控制台要你明确再要一次。）</p>
+<p>实现方式是在「启动」文件夹放一个快捷方式，指向 <code>tools\launch-panel.vbs</code>，</p>
+<p>不需要管理员权限、不写注册表。<strong>你自己删掉那个快捷方式，设置页的勾也会跟着取消</strong>。</p>
+<p>想彻底撤掉，取消勾选，或跑 <code>tools\uninstall.cmd</code>。</p>
+<hr>
+</section>
+<section class="card" id="10-窗口找不到了怎么办"><h2>10. 窗口找不到了怎么办</h2>
+<p><strong>双击桌面上的「桌面日程」快捷方式</strong>：面板会立刻出现在屏幕上，并且**临时跳到所有窗口</p>
+<p>最上面 3 秒**（浏览器开着也不怕被盖住），3 秒后回到它平时待的桌面层。</p>
+<blockquote>为什么要"临时"跳上来：面板平时是<strong>桌面挂件</strong>，压在普通窗口之下。不跳上来的话，</blockquote>
+<blockquote>你双击了快捷方式却什么也看不到 —— 会以为是"点了没反应"（真有人这么报过）。</blockquote>
+<p><strong>托盘图标（屏幕右下角通知区）一直都在</strong>：只要程序在跑 —— 哪怕只开了日程表面板 ——</p>
+<p>那里就有「桌面日程」的图标。</p>
+<ul>
+<li>* <strong>双击</strong>它 → 把控制台窗口叫到最前面（并让任务栏按钮闪一下）；控制台没开就顺手开一个。</li>
+<li>* <strong>右键</strong>它 → 「呼出客户端窗口 / 快速录入群消息… / 打开桌面面板 / 收起桌面面板 /</li>
+</ul>
+<p>  立即整合群通知 / 退出应用」。</p>
+<blockquote>点它没反应？那多半是个<strong>残留图标</strong>：程序被强杀（任务管理器结束进程、或崩溃）时，</blockquote>
+<blockquote>Windows 会把这个图标留在通知区，直到你把鼠标移上去或重启资源管理器。</blockquote>
+<blockquote>把鼠标在它上面停一下就会消失，然后再从桌面快捷方式正常启动一次即可。</blockquote>
+<h3>控制台不见了</h3>
+<p>它可能被最小化至托盘了（进程还在）。两种办法叫回来：</p>
+<table><thead><tr>
+<th>办法</th>
+<th>怎么做</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>点面板右下角 ⚙</strong></td>
+<td>齿轮菜单里有「打开客户端窗口」</td>
+</tr>
+<tr>
+<td><strong>托盘图标</strong></td>
+<td>双击图标，或右键 →「呼出客户端窗口」</td>
+</tr>
+<h3>面板不见了</h3>
+<tr>
+<td>情况</td>
+<td>处理</td>
+</tr>
+<tr>
+<td>有全屏应用在前台</td>
+<td>正常（智能隐身在起作用），切出来就回来</td>
+</tr>
+<tr>
+<td>曾手动收起</td>
+<td>双击桌面快捷方式——它会把面板叫回眼前</td>
+</tr>
+<tr>
+<td>面板进程真的退了</td>
+<td>同上：双击桌面快捷方式会重新拉起它</td>
+</tr>
+<tr>
+<td>就是不出来</td>
+<td>命令行跑 <code>runtime\python.exe main.py --panel</code>，再看 <code>data\panel.log</code></td>
+</tr>
+<h3>关掉控制台不等于关掉日程表</h3>
+</tbody></table>
+<p>点控制台右上角的 <code>X</code> <strong>只是把它最小化至托盘</strong>：日程表继续显示、通知照收、到点提醒照弹。</p>
+<p><strong>完全退出</strong>只有两个入口（都会把面板和托盘一起退干净）：</p>
+<table><thead><tr>
+<th>入口</th>
+<th>位置</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>退出应用</strong></td>
+<td>托盘图标右键</td>
+</tr>
+<tr>
+<td><strong>退出应用（面板与托盘一并退出）</strong></td>
+<td>面板右下角 <strong>⚙</strong> 菜单最后一项，或右键底部状态行</td>
+</tr>
+<h3>托盘图标右键菜单</h3>
+<tr>
+<td>菜单项</td>
+<td>做什么</td>
+</tr>
+<tr>
+<td><strong>呼出客户端窗口</strong></td>
+<td>把控制台叫到最前面</td>
+</tr>
+<tr>
+<td><strong>快速录入群消息…</strong></td>
+<td>叫出控制台、切到「通知」页，粘上就能存</td>
+</tr>
+<tr>
+<td><strong>打开桌面面板 / 收起桌面面板</strong></td>
+<td>开关桌面那条日程表</td>
+</tr>
+<tr>
+<td><strong>立即整合群通知</strong></td>
+<td>立刻整合一次 <code>data\inbox</code></td>
+</tr>
+<tr>
+<td><strong>退出应用</strong></td>
+<td>面板 + 托盘一起退干净</td>
+</tr>
+<hr>
+</table>
+</section>
+<section class="card" id="11-数据在哪怎么备份怎么恢复"><h2>11. 数据在哪、怎么备份、怎么恢复</h2>
+<p>全部在 <code>data\</code> 目录，<strong>都是能直接看的 JSON</strong>：</p>
+<table><thead><tr>
+<th>文件</th>
+<th>是什么</th>
+</tr></thead><tbody>
+<tr>
+<td><code>events.json</code></td>
+<td>一周内的通知（日程本体）</td>
+</tr>
+<tr>
+<td><code>timetable.json</code></td>
+<td>课程表 + 课时表 + 学期开始</td>
+</tr>
+<tr>
+<td><code>calendar.json</code></td>
+<td>假期区间 + 调休</td>
+</tr>
+<tr>
+<td><code>client.json</code></td>
+<td>设置</td>
+</tr>
+<tr>
+<td><code>state.json</code></td>
+<td>上次整合的时间与摘要</td>
+</tr>
+<tr>
+<td><code>inbox\</code></td>
+<td>待整合的群消息（丢这里会被处理）</td>
+</tr>
+<tr>
+<td><code>archive\</code></td>
+<td>整合过的原始文件</td>
+</tr>
+<tr>
+<td><code>theme\</code></td>
+<td>你选的背景照片</td>
+</tr>
+<tr>
+<td><code>panel.log</code></td>
+<td>出错时的日志（<strong>正常时是空的</strong>）</td>
+</tr>
+</tbody></table>
+<ul>
+<li>- <strong>备份</strong>：整个 <code>data\</code> 拷走就是完整备份。</li>
+<li>- <strong>恢复</strong>：拷回来覆盖。</li>
+<li>- <strong>清理</strong>：删 <code>events.json</code> 清空通知；删 <code>timetable.json</code> 清空课表。</li>
+<li>- <strong>自动备份</strong>：每次导入/保存课表都写 <code>timetable.json.bak</code>（「撤销上次导入」用它）。</li>
+</ul>
+<blockquote><strong>这个目录别分享给别人</strong>：里面有你的课表和通知。发给朋友的是程序目录，不是 <code>data\</code>。</blockquote>
+<hr>
+</section>
+<section class="card" id="12-常见问题"><h2>12. 常见问题</h2>
+<table><thead><tr>
+<th>现象</th>
+<th>处理</th>
+</tr></thead><tbody>
+<tr>
+<td><strong>双击快捷方式没反应</strong></td>
+<td>日程表可能已经在跑了——这时它会把面板叫到眼前。要控制台请点面板右下角 ⚙</td>
+</tr>
+<tr>
+<td><strong>控制台打不开</strong></td>
+<td>它可能已最小化至托盘：双击托盘图标，或点面板 ⚙ →「打开客户端窗口」</td>
+</tr>
+<tr>
+<td>面板点不动</td>
+<td>检查 <code>data\client.json</code> 里 <code>"click_through"</code> 是不是被手改成了 <code>true</code>，改回 <code>false</code> 再重启面板</td>
+</tr>
+<tr>
+<td>面板被别的窗口挡住</td>
+<td>它是桌面层窗口，属正常；想始终在最前，把 <code>client.json</code> 的 <code>"window_mode"</code> 改成 <code>"topmost"</code></td>
+</tr>
+<tr>
+<td>按 <code>Win+D</code> 后面板消失</td>
+<td>检查 <code>client.json</code> 里 <code>"pet_mode"</code> 是不是被改成了 <code>false</code>（默认 <code>true</code>）</td>
+</tr>
+<tr>
+<td>游戏里被挡</td>
+<td>设置 → 待机模式 → 选「智能隐身」</td>
+</tr>
+<tr>
+<td>放假了还在排课</td>
+<td>「假期」页加一段假期，或把放假通知粘进去让它自己认</td>
+</tr>
+<tr>
+<td>调休那天显示平时的课</td>
+<td>「假期」页下面加一条调休：调休日 + 补哪天的课</td>
+</tr>
+<tr>
+<td>节日当天没有彩蛋</td>
+<td>当天必定出现（按内置农历算）。想让整个假期都有气氛，就加一段<strong>包含节日当天</strong>的区间</td>
+</tr>
+<tr>
+<td>文件提示「未能识别课表」</td>
+<td>命令行看一眼：<code>runtime\python.exe -m agenda.file_import 你的文件</code>，会打印读到的内容和卡在哪一步</td>
+</tr>
+<tr>
+<td>周次和教务不一样</td>
+<td>在确认窗顶部改「第 1 教学周周一」</td>
+</tr>
+<tr>
+<td>读到的课缺老师/地点</td>
+<td>确认窗里双击补上</td>
+</tr>
+<tr>
+<td>通知标题粘了半句话</td>
+<td>已修：现在会在「事项名：说明」的冒号处截断。还有问题请把原文发我</td>
+</tr>
+<tr>
+<td>拖入文件没反应</td>
+<td>确认拖的是文件或文件夹（不是选中的文字）</td>
+</tr>
+<tr>
+<td>面板滚动卡</td>
+<td>已优化（卡片控件复用）。仍卡请反馈通知数量</td>
+</tr>
+<tr>
+<td>需要适配别的学校</td>
+<td>跑 <code>runtime\python.exe tools\probe_schools.py</code> 看那个学校的入口形态</td>
+</tr>
+<hr>
+</table>
+</section>
+<section class="card" id="13-命令行参数"><h2>13. 命令行参数</h2>
+<p>一般用不到，排错和自动化时有用（<code>runtime\python.exe</code> 是项目自带的 Python）：</p>
+</section>
+<pre><code>
+runtime\python.exe main.py --shortcut               # 桌面快捷方式入口：只开面板
+runtime\python.exe main.py --panel                  # 只开面板（开机自启动走这条）
+runtime\python.exe main.py --client --start-panel   # 控制台 + 面板
+runtime\python.exe main.py --tutorial               # 打开这份教程（窗口版）
+runtime\python.exe main.py --tutorial-web           # 生成网页版教程并用浏览器打开
+runtime\python.exe main.py --status                 # 命令行看一周日程
+runtime\python.exe main.py --once                   # 整合 inbox 一次
+runtime\python.exe main.py --check-timetable        # 逐条列出读到的课
+runtime\python.exe main.py --paste --group 班群      # 从 stdin 粘一条通知
+runtime\python.exe main.py --list-schools           # 看已登记的学校
+runtime\python.exe -m agenda.file_import 课表.ics    # 单独试文件识别
+runtime\python.exe -m unittest discover -s tests -t .   # 跑测试
+</code></pre>
+<p>其它开关：<code>--width</code>、<code>--refresh</code>、<code>--pipeline-minutes</code>、<code>--window-mode</code>、</p>
+<p><code>--no-click-through</code>、<code>--always-visible</code>、<code>--no-pet-mode</code>、<code>--panel-x/--panel-y</code>、<code>--data-dir</code>。</p>
+<p><strong>重新生成这份教程里的配图</strong>（改了界面之后）：</p>
+<pre><code>
+runtime\python.exe tools\capture_tutorial.py
+</code></pre>
+<hr>
+<section class="card" id="还想更深入"><h2>还想更深入？</h2>
+<ul>
+<li>- <code>README.md</code> —— 面向开发者：架构、扩展点、每个实现选择的实测证据</li>
+<li>- <code>docs/school-reachability.md</code> —— 四所学校入口的实测记录</li>
+<li>- <code>data\</code> —— 你的数据，都是明文 JSON，可以直接编辑</li>
+</ul>
+</section>
+</div>
+<script>
+document.querySelectorAll('figure img').forEach(function (img) {
+  img.addEventListener('click', function () {
+    var big = img.style.maxWidth === 'none';
+    img.style.maxWidth = big ? '' : 'none';
+    img.style.width = big ? '' : 'auto';
+    img.style.cursor = big ? 'zoom-in' : 'zoom-out';
+  });
+});
+</script>
+</body>
+</html>

@@ -11,4 +11,6 @@
 """
 
 __all__ = ["models", "parsing", "extract", "aggregate", "store", "panel", "pipeline"]
-__version__ = "0.1.0"
+#: 版本号。以前一直停在 0.1.0（谁也没读它），发布到 v1.3 时对齐一下，
+#: 免得有人查版本时对着一个跟 Release 对不上的数字发懵。
+__version__ = "1.3.0"

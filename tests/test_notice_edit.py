@@ -59,7 +59,10 @@ class EditAndSupplementTests(ClipboardSafeTestCase):
             ],
         }, ensure_ascii=False), encoding="utf-8")
         try:
+            # hide_past=False：事件时间写死在 11:00/14:00，而面板默认隐藏已过期的通知。
+            # 不关掉的话，晚上跑测试这些卡片就全没了（同一个提交凌晨绿、晚上红）。
             self.panel = AgendaPanel(self.data, pipeline_ms=0, autostart_pipeline=False,
+                                     hide_past=False,
                                      window_mode="desktop", position=(80, 60))
         except Exception as error:                 # 无图形环境
             self.tmp.cleanup()

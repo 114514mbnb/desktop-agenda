@@ -96,7 +96,11 @@ class CardActionTests(ClipboardSafeTestCase):
         }, ensure_ascii=False), encoding="utf-8")
         self._write_events(["班会：材料提交", "讲座：多模态大模型"])
         try:
+            # hide_past=False：这条用例要看的是"卡片上的操作"，而事件时间写死在 12:00。
+            # 面板默认会隐藏**已过期**的通知 —— 不关掉的话，晚上跑测试卡片就没了
+            # （同一个提交凌晨绿、晚上红，真踩过）。
             self.panel = AgendaPanel(self.data, pipeline_ms=0, autostart_pipeline=False,
+                                     hide_past=False,
                                      window_mode="desktop", position=(80, 60))
         except Exception as error:                 # 无图形环境
             self.tmp.cleanup()
@@ -261,6 +265,7 @@ class PanelDialogVisibilityTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             panel = AgendaPanel(Path(tmp), pipeline_ms=0, autostart_pipeline=False,
+                                hide_past=False,
                                 window_mode="desktop", position=(80, 60))
             try:
                 panel.root.update()
@@ -291,6 +296,7 @@ class PanelDialogVisibilityTests(unittest.TestCase):
                             "start": "12:00", "end": "13:00", "notes": "交到辅导员办公室"}],
             }, ensure_ascii=False), encoding="utf-8")
             panel = AgendaPanel(data, pipeline_ms=0, autostart_pipeline=False,
+                                hide_past=False,
                                 window_mode="desktop", position=(80, 60))
             try:
                 panel.root.update()

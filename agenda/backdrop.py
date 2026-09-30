@@ -221,6 +221,67 @@ def tint_picture(picture: Picture, color: str, ratio: float) -> Picture:
                    pixels=bytes(out), stride=picture.stride)
 
 
+def vertical_fade(picture: Picture, color: str, *, top: float = 0.30,
+                  bottom: float = 0.80) -> Picture:
+    """自上而下把画面**逐行**混向 `color`（上面看得清照片，下面渐渐化进面板底色）。
+
+    为什么必须算进像素：Tk 的 Canvas 矩形是**不透明**的。想用几条矩形叠在照片上做
+    "渐变遮罩"，结果是把整张照片盖成一堆纯色 —— 用户选完照片只看到颜色变了、
+    照片根本没出现（他报的"没有选照片没反应"就是这一条）。
+    坐标与 stride 沿用原图，只改颜色字节。
+    """
+    top = max(0.0, min(1.0, top))
+    bottom = max(0.0, min(1.0, bottom))
+    red, green, blue = _parts(color)
+    source = picture.pixels
+    out = bytearray(source)
+    rows = max(1, picture.height - 1)
+    for y in range(picture.height):
+        ratio = top + (bottom - top) * (y / rows)
+        keep = 1.0 - ratio
+        row = y * picture.stride
+        for x in range(picture.width):
+            offset = row + x * 4
+            out[offset] = int(source[offset] * keep + blue * ratio)
+            out[offset + 1] = int(source[offset + 1] * keep + green * ratio)
+            out[offset + 2] = int(source[offset + 2] * keep + red * ratio)
+    return Picture(width=picture.width, height=picture.height,
+                   pixels=bytes(out), stride=picture.stride)
+
+
+def scale_to_width(picture: Picture, width: int) -> Picture:
+    """按宽度等比缩到 `width` 像素（就近取样；只用于把照片缩到面板够用的尺寸）。"""
+    width = max(1, int(width))
+    if picture.width <= width:
+        return picture
+    height = max(1, round(picture.height * width / picture.width))
+    return _resample(picture, width, height)
+
+
+def scale_to_height(picture: Picture, height: int) -> Picture:
+    """按高度等比缩到 `height` 像素。"""
+    height = max(1, int(height))
+    if picture.height == height:
+        return picture
+    width = max(1, round(picture.width * height / picture.height))
+    return _resample(picture, width, height)
+
+
+def _resample(picture: Picture, width: int, height: int) -> Picture:
+    """就近取样缩放到指定尺寸（够用：照片只是当背景，不做高质量采样）。"""
+    out = bytearray(width * height * 4)
+    for y in range(height):
+        source_y = min(picture.height - 1, y * picture.height // height)
+        source_row = source_y * picture.stride
+        target_row = y * width * 4
+        for x in range(width):
+            source_x = min(picture.width - 1, x * picture.width // width)
+            source_offset = source_row + source_x * 4
+            target_offset = target_row + x * 4
+            out[target_offset:target_offset + 4] = picture.pixels[source_offset:source_offset + 4]
+    return Picture(width=width, height=height, pixels=bytes(out), stride=width * 4)
+
+
 # ---------------------------------------------------------------------------
 # 取色与对比度
 # ---------------------------------------------------------------------------
@@ -403,20 +464,53 @@ def _accent_from(picture: Picture, *, light_scene: bool) -> str:
 
 THEME_DIR = "theme"
 BACKGROUND_NAME = "background.png"
+#: 用户原图的副本（已经缩到合理宽度）。留着是为了「调整照片范围…」能重新框选——
+#: 只存裁好的成品就没法再改了。
+SOURCE_NAME = "source.png"
+#: 标题区用的成品条：宽度够面板用就行，存太大只是让 PNG 白白变胖
+STRIP_WIDTH = 1000
 
 
 def background_path(data_dir: Path) -> Path:
     return Path(data_dir) / THEME_DIR / BACKGROUND_NAME
 
 
-def prepare_background(source: Path | str, data_dir: Path, *,
+def source_path(data_dir: Path) -> Path:
+    return Path(data_dir) / THEME_DIR / SOURCE_NAME
+
+
+def apply_box(picture: Picture, box) -> Picture:
+    """按**归一化**的框（x, y, w, h，取值 0~1）裁一块出来。
+
+    用比例而不是像素：对话框里显示的是缩略图，像素坐标和原图对不上；
+    比例则与缩放无关，缩略图上框多少，成品就是多少。
+    """
+    if box is None:
+        return picture
+    x, y, w, h = (max(0.0, min(1.0, float(value))) for value in box)
+    left = int(round(x * picture.width))
+    top = int(round(y * picture.height))
+    width = max(1, int(round(w * picture.width)))
+    height = max(1, int(round(h * picture.height)))
+    left = max(0, min(left, picture.width - 1))
+    top = max(0, min(top, picture.height - 1))
+    width = min(width, picture.width - left)
+    height = min(height, picture.height - top)
+    return crop(picture, left, top, width, height)
+
+
+def prepare_background(source: Path | str, data_dir: Path, *, box=None,
                        max_width: int = PREPARE_WIDTH) -> tuple[bool, str]:
     """把用户挑的照片转成程序自己的背景图，返回 (成功?, 说明)。
 
     为什么要转存而不是直接用原图：
       * Tk 不认 JPEG，每次启动都解码原图（可能十几 MB）又慢又占内存；
       * 原图可能被移动/删除，转存之后行为稳定；
-      * 顺手缩到 1600 px 宽，PNG 只有几百 KB。
+      * 顺手缩放，PNG 只有几百 KB。
+
+    `box`：用户在框选对话框里选的范围（归一化）。给了就先裁再缩——
+    裁出来的成品是"标题区那么宽的一条"，所以按 `STRIP_WIDTH` 存，不必存到 1600 宽。
+    同时把**没裁过的原图**另存一份，供「调整照片范围…」重新框选。
     """
     source = Path(source)
     if not source.is_file():
@@ -424,11 +518,34 @@ def prepare_background(source: Path | str, data_dir: Path, *,
     picture = load_image(source, max_width=max_width)
     if picture is None:
         return False, "这个图片格式读不出来（支持 JPG / PNG / BMP / GIF）"
+    if not write_png(picture, source_path(Path(data_dir))):
+        return False, f"写入失败：{source_path(Path(data_dir))}"
+    strip = apply_box(picture, box)
+    if box is not None:
+        strip = scale_to_width(strip, min(max_width, STRIP_WIDTH))
     target = background_path(Path(data_dir))
-    if not write_png(picture, target):
+    if not write_png(strip, target):
         return False, f"写入失败：{target}"
     size_kb = target.stat().st_size / 1024
-    return True, f"已使用：{source.name}（{picture.width}×{picture.height}，{size_kb:.0f} KB）"
+    return True, f"已使用：{source.name}（{strip.width}×{strip.height}，{size_kb:.0f} KB）"
+
+
+def source_file(data_dir: Path) -> Path:
+    """原图文件的**实际**路径：优先 `source.png`；老版本没存过它就退回成品 `background.png`。
+
+    老版本（还没有框选功能时）只存了成品，而那时成品就是整张原图 —— 所以拿它当原图
+    重新框选是对的。新版本每次同时写两份，这个回退只在升级时命中。
+    调用方**必须**用它取路径，不要自己拼 `source_path()`：拼出来的路径在老数据上不存在，
+    `prepare_background()` 会直接报"找不到这个文件"（这个坑我自己踩过一次）。
+    """
+    data_dir = Path(data_dir)
+    candidate = source_path(data_dir)
+    return candidate if candidate.is_file() else background_path(data_dir)
+
+
+def load_source(data_dir: Path, *, max_width: int = PREPARE_WIDTH) -> Picture | None:
+    """读那份没裁过的原图（「调整照片范围…」要用它）。"""
+    return load_image(source_file(data_dir), max_width=max_width)
 
 
 def load_background(data_dir: Path, *, max_width: int) -> Picture | None:
@@ -441,7 +558,8 @@ def has_background(data_dir: Path) -> bool:
 
 
 def clear_background(data_dir: Path) -> None:
-    try:
-        background_path(Path(data_dir)).unlink()
-    except OSError:
-        pass
+    for path in (background_path(Path(data_dir)), source_path(Path(data_dir))):
+        try:
+            path.unlink()
+        except OSError:
+            pass

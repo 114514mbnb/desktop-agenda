@@ -302,11 +302,23 @@ class PanelHotkeyTests(ClipboardSafeTestCase):
                 panel.quit()
 
     def test_clipboard_action_ingests_a_notice(self):
-        """按热键的完整闭环：剪贴板里的群通知 → 真的进了 events.json。"""
+        """按热键的完整闭环：剪贴板里的群通知 → 真的进了 events.json。
+
+        这条**必须关掉"优先抓选区"**：否则 `ingest_clipboard()` 会先向前台窗口
+        合成 Ctrl+C，抓到什么完全取决于跑测试时前台是哪个窗口
+        （前台浏览器里恰好有选中文字就会抓走它，通知反而没入库）。
+        以前它一直"恰好通过"，是因为抓选区本身有 bug 总失败、每次都退回剪贴板；
+        那个 bug 修好之后这里就露馅了。闭环本身用剪贴板模式验，与前台无关。
+        """
         if not IS_WINDOWS:
             self.skipTest("只有 Windows 支持")
         with tempfile.TemporaryDirectory() as tmp:
             data = Path(tmp)
+            from agenda.client_config import ClientConfig
+
+            config = ClientConfig.load(data)
+            config.hotkey_selection = False           # 只看剪贴板，不碰前台
+            config.save(data)
             panel = self._panel(data)
             try:
                 panel.root.update()
