@@ -94,7 +94,7 @@ runtime\python.exe main.py --tutorial               # 打开使用教程
 runtime\python.exe main.py --once                   # 整合 inbox 一次
 runtime\python.exe main.py --status                 # 命令行查看一周日程
 runtime\python.exe main.py --list-schools           # 看已注册的教务适配器/学校
-runtime\python.exe -m unittest discover -s tests -t .   # 跑测试（656 项，约 1 分钟）
+runtime\python.exe -m unittest discover -s tests -t .   # 跑测试（684 项，约 1 分钟）
 ```
 
 **为什么自带运行时**：`runtime\` 里是一份 python-build-standalone（3.13.15，来自 npmmirror
@@ -433,7 +433,7 @@ desktop-agenda/
       registry.py         适配器注册表 + 学校目录
       importer.py         落盘 timetable.json（带备份/回退）
     pipeline.py           一次完整跑批：扫描 → 解析 → 合并 → 归档 → 清理
-  tests/                  656 项测试（解析、去重、课表、时间线、适配器、导入流程、正方脏字段清洗、
+  tests/                  684 项测试（解析、去重、课表、时间线、适配器、导入流程、正方脏字段清洗、
                           课时表校验、示例文件防线、拖放接收、控制台找回、单条日程操作、通知编辑与补充、
                           剪贴板热键与修饰键处理、面板主题、课表体检、节日彩蛋与合并假期分段、
                           面板贴顶与过期让位、教程渲染、界面精简/齿轮入口、CDP 帧、
@@ -588,7 +588,7 @@ desktop-agenda/
 | 改节日彩蛋 | `agenda/festival.py`（文案/配色/装饰）、`tools/capture_festivals.py` 出效果图 |
 | 升级农历库 | 整份覆盖 `agenda/vendor/lunardate.py` → 更新 `__init__.py` 里的版本与 SHA-256 → 跑 `tests/test_lunar.py` |
 
-跑测试：`runtime\python.exe -m unittest discover -s tests -t .`（656 项，约 1 分钟）
+跑测试：`runtime\python.exe -m unittest discover -s tests -t .`（684 项，约 1 分钟）
 
 写代码时请留意两条约定：
 1. **不引入第三方运行时依赖**——只用标准库，换电脑零配置

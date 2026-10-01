@@ -249,6 +249,27 @@ def vertical_fade(picture: Picture, color: str, *, top: float = 0.30,
                    pixels=bytes(out), stride=picture.stride)
 
 
+def gradient(width: int, height: int, top: str, bottom: str) -> Picture:
+    """竖直线性渐变：第 0 行是 `top`，最后一行是 `bottom`。
+
+    用于「随时刻」主题的标题区（清晨日出 / 黄昏日落 / 中午一条淡天蓝 / 深夜夜空）。
+
+    按**行**算色再整行铺开：整幅只有 `height` 个颜色，一行一次 `bytes * width`；
+    逐像素 `blend()` 在纯 Python 里要跑 width×height 次，实测那样一张 360×160 的图
+    要 60 ms 以上，而这样不到 2 ms。
+    """
+    width = max(1, int(width))
+    height = max(1, int(height))
+    rows = max(1, height - 1)
+    pixels = bytearray(width * height * 4)
+    for y in range(height):
+        red, green, blue = _parts(blend(top, bottom, y / rows))
+        line = bytes((blue, green, red, 255)) * width
+        start = y * width * 4
+        pixels[start:start + len(line)] = line
+    return Picture(width=width, height=height, pixels=bytes(pixels), stride=width * 4)
+
+
 def scale_to_width(picture: Picture, width: int) -> Picture:
     """按宽度等比缩到 `width` 像素（就近取样；只用于把照片缩到面板够用的尺寸）。"""
     width = max(1, int(width))
@@ -427,6 +448,11 @@ def palette_from_image(picture: Picture, *, accent_hint: tuple[int, int, int] | 
         "border": border,
         "today_bg": today_bg,
         "card_off": card_off,
+        # 标题区渐变端点：照片模式铺的是照片本体，这两个键只是为了让
+        # "每套配色键都一样"成立（`theme.apply_palette` 少一个键就报错，
+        # 而 `palettes.CLASSIC` 里已经有这两个键了）。
+        "head_top": bg_soft,
+        "head_bottom": bg_soft,
     }
 
 

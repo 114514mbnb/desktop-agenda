@@ -55,6 +55,15 @@ PIPELINE_MS = 15 * 60_000     # 自动整合 inbox
 FOOTER_HINT = ""
 
 
+def card_cache_key(card: Card) -> tuple:
+    """卡片控件的缓存键 = 卡片内容 + 当前配色指纹。
+
+    配色一换键就变，旧卡片自然被丢弃重建（底色跟着新主题走）。
+    见 `_palette_stamp` 的注释：忘了这一层就会出现"深底深字看不清"。
+    """
+    return (card_key(card), _palette_stamp())
+
+
 def card_key(card: Card) -> tuple:
     """卡片的缓存键：**不含 progress/时间文本**这些每刷新都会变的东西。
 
@@ -373,6 +382,44 @@ def _center_over(window: tk.Toplevel, parent) -> None:
         pass
 
 
+#: 换主题时要挨个检查的"颜色类"控件选项。
+#: 各控件支持的选项不一样（Canvas 没有 -fg、Label 没有 -troughcolor），
+#: cget/configure 抛 TclError 就当它不支持，跳过即可。
+COLOR_OPTIONS: tuple[str, ...] = (
+    "bg", "fg", "background", "foreground",
+    "activebackground", "activeforeground",
+    "troughcolor", "highlightbackground", "highlightcolor",
+    "selectbackground", "selectforeground", "selectcolor",
+    "insertbackground", "disabledbackground", "disabledforeground",
+)
+
+
+def _walk_widgets(root):
+    """深度优先遍历一棵控件树（含 `root` 自己）。"""
+    stack = [root]
+    while stack:
+        widget = stack.pop()
+        yield widget
+        try:
+            stack.extend(widget.winfo_children())
+        except Exception:                                    # noqa: BLE001
+            continue
+
+
+def _palette_stamp() -> tuple:
+    """当前配色的"指纹"：卡片缓存用它判断要不要重建。
+
+    为什么必须带上它：卡片是**缓存复用**的（内容没变就不重建控件），而缓存键原来
+    只看卡片内容 —— 于是换了主题之后旧卡片原地留着，**底色还是上一套配色的**：
+    浅色主题上冒出深色卡片、深色主题上冒出白卡片，而文字已经换成新主题的颜色，
+    实际效果就是"深底深字看不清"（`test_theme_modes` 那条实拍级可读性用例抓到的
+    就是这个）。带上配色指纹之后，换主题 = 缓存键变了 = 卡片重建，天然正确。
+    """
+    colors = theme.COLORS
+    return (colors.get("card"), colors.get("bg"), colors.get("accent"),
+            colors.get("card_now"), colors.get("card_past"))
+
+
 def _lower_widget(widget) -> None:
     """把控件压到同级窗口的最底层。
 
@@ -615,20 +662,27 @@ class AgendaPanel:
         body = tk.Frame(self.shell, bg=colors["bg"])
         self.body = body
         self.canvas = tk.Canvas(body, bg=colors["bg"], highlightthickness=0, bd=0)
-        # 滚轮条：细一点。滑块颜色要比面板底色亮一档，否则在深色面板上几乎看不见
-        # （"线"色 #2A3240 跟卡片底 #1D2430 太接近，实测截图里就是一条若有若无的线）
-        self.scrollbar = tk.Scrollbar(
-            body, orient="vertical", command=self.canvas.yview,
-            width=int(10 * self.scale), bd=0, highlightthickness=0,
-            troughcolor=colors["bg_soft"], background=colors["text_faint"],
-            activebackground=colors["accent"], relief="flat",
+        # 滚动条是**自己画的**（Canvas 上一条圆角滑块），不是 Tk 的原生 Scrollbar。
+        #
+        # 为什么不用原生：Windows 上它由系统绘制，**根本不吃颜色** —— 实测设成
+        # `bg=#FF0000, troughcolor=#00FF00`，画出来还是系统灰 `#F0F0F0`。深色主题上
+        # 那就是一条突兀的亮灰条；用户也问过"这个滚动条怎么回事"。自绘之后颜色跟着
+        # 主题走、宽度也由我们定（6px，比原来细一半）。
+        self.scrollbar = tk.Canvas(
+            body, width=int(6 * self.scale), highlightthickness=0, bd=0,
+            bg=colors["bg"], cursor="arrow",
         )
+        self.scrollbar_thumb = None
+        self._scroll_info = (0.0, 1.0)
+        self.scrollbar.bind("<Button-1>", self._scrollbar_press)
+        self.scrollbar.bind("<B1-Motion>", self._scrollbar_drag)
+        self.scrollbar.bind("<Configure>", lambda _e: self._draw_scrollbar())
         # 顺序很关键：**先 pack 滚动条**，再 pack 画布。
         # 反过来写的话 canvas 的 expand=True 会先把整行宽度吃掉，
         # 滚动条只剩 1px，肉眼看不到（实测 rect 里右边那条细线一直没出现）。
         self.scrollbar.pack(side="right", fill="y")
         self.canvas.pack(side="left", fill="both", expand=True)
-        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+        self.canvas.configure(yscrollcommand=self._on_timeline_scroll)
 
         self.inner = tk.Frame(self.canvas, bg=colors["bg"])
         self._inner_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -681,6 +735,8 @@ class AgendaPanel:
             widget.bind("<Button-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._do_drag)
             widget.bind("<ButtonRelease-1>", self._end_drag)
+        # 标题区一变宽就重画渐变/照片（否则拉宽后右边露出一条没画到的平色带）
+        header.bind("<Configure>", self._on_header_configure, add="+")
         for widget in (self.shell, self.canvas, self.inner, body, self.header_canvas,
                        self.scrollbar, self.clock_label, self.date_label, self.next_label):
             widget.bind("<Button-3>", self._popup_menu)
@@ -791,6 +847,10 @@ class AgendaPanel:
 
         鼠标穿透开着时本来就点不到，所以这里只在非穿透场景有用；
         但尺寸持久化照常工作。
+
+        ⚠ 它们**必须贴在边框里面**（见 `_place_resize_grips`）：这两个 Frame 是不透明的，
+        压在窗口最外层就会把右边框/下边框整条盖掉 —— 用户截图问"右边框呢？"
+        就是这个（节日时左/上/下三边都是 6px 节日色，右边却是面板底色）。
         """
         grip = int(6 * self.scale)
         edge = tk.Frame(self.root, bg=theme.COLORS["bg"], cursor="sb_h_double_arrow")
@@ -804,6 +864,25 @@ class AgendaPanel:
         corner.bind("<Button-1>", self._start_resize)
         corner.bind("<B1-Motion>", self._do_resize)
         self._resize_corner = corner
+        self._place_resize_grips()
+
+    def _place_resize_grips(self) -> None:
+        """按**当前边框宽度**把拖拽把手/缩放手柄往内让开，别盖住边框。
+
+        边框平时 1px、节日期间 6px（还会呼吸变色），所以这个偏移要在节日开始/结束时
+        跟着更新 —— 固定写死的话，节日那几天右边框就又被盖掉了。
+        """
+        pad = int(self.FESTIVAL_FRAME_PAD if getattr(self, "_festival_frame_color", None)
+                  else self.FRAME_PAD)
+        for widget, options in ((getattr(self, "_resize_edge", None), {"x": -pad}),
+                                (getattr(self, "_resize_corner", None),
+                                 {"x": -pad, "y": -pad})):
+            if widget is None:
+                continue
+            try:
+                widget.place_configure(**options)
+            except tk.TclError:
+                pass
 
     def _build_menu(self) -> None:
         """右键菜单——**这是用户主动让面板消失的唯一途径**（客户端也可以）。
@@ -1313,6 +1392,124 @@ class AgendaPanel:
             self._snap_to_top()
         except tk.TclError:
             pass
+        self._draw_scrollbar()
+
+    # ------------------------------------------------------------------
+    # 自绘滚动条（跟主题走；原生 Scrollbar 在 Windows 上不吃颜色）
+    # ------------------------------------------------------------------
+    def _on_timeline_scroll(self, first, last) -> None:
+        """Canvas 报告可视范围变化 → 重画滑块。"""
+        try:
+            self._scroll_info = (float(first), float(last))
+        except (TypeError, ValueError):
+            self._scroll_info = (0.0, 1.0)
+        self._draw_scrollbar()
+
+    def _draw_scrollbar(self) -> None:
+        """画滑块：一根圆角胶囊，位置和长度对应可视范围；内容全看得见时不画。
+
+        圆角用 `create_line(capstyle="round")` 实现 —— Tk 的矩形没有圆角，
+        一条带圆头的粗线就是胶囊。
+        """
+        canvas = getattr(self, "scrollbar", None)
+        if canvas is None:
+            return
+        colors = theme.COLORS
+        try:
+            canvas.delete("thumb")
+            self.scrollbar_thumb = None
+            height = max(1, canvas.winfo_height())
+            width = max(2, canvas.winfo_width())
+            first, last = getattr(self, "_scroll_info", (0.0, 1.0))
+            if last - first >= 0.999:                 # 内容都在视野里 → 不显示
+                return
+            pad = int(2 * self.scale)
+            top = pad + (height - 2 * pad) * first
+            bottom = pad + (height - 2 * pad) * last
+            shortest = int(16 * self.scale)
+            if bottom - top < shortest:               # 滑块别短到点不着
+                bottom = min(height - pad, top + shortest)
+                top = max(pad, bottom - shortest)
+            center = width / 2
+            self.scrollbar_thumb = canvas.create_line(
+                center, top, center, bottom, width=max(2, width - 2 * pad),
+                # 比"线"色亮一档：深色主题上也要看得见（原注释里的老问题）
+                fill=theme.mix(colors["text_faint"], colors["bg"], 0.25),
+                capstyle="round", tags="thumb")
+        except tk.TclError:
+            pass
+
+    def _scrollbar_press(self, event) -> None:
+        """点滚动条：点在滑块上开始拖，点在空白处翻页。"""
+        canvas = getattr(self, "scrollbar", None)
+        if canvas is None or self.scrollbar_thumb is None:
+            return
+        height = max(1, canvas.winfo_height())
+        first, last = getattr(self, "_scroll_info", (0.0, 1.0))
+        top, bottom = first * height, last * height
+        if top <= event.y <= bottom:
+            self._scroll_drag_offset = event.y - top
+            return
+        self._scroll_drag_offset = max(1.0, (bottom - top) / 2)
+        self._scrollbar_to(event.y)
+
+    def _scrollbar_drag(self, event) -> None:
+        if getattr(self, "_scroll_drag_offset", None) is None:
+            return
+        self._scrollbar_to(event.y)
+
+    def _scrollbar_to(self, y: int) -> None:
+        """把滑块挪到鼠标位置（换算成 0~1 的滚动比例）。"""
+        canvas = getattr(self, "scrollbar", None)
+        if canvas is None:
+            return
+        height = max(1, canvas.winfo_height())
+        first, last = getattr(self, "_scroll_info", (0.0, 1.0))
+        span = last - first
+        if span >= 1.0 or span <= 0.0:
+            return
+        offset = getattr(self, "_scroll_drag_offset", 0) or 0
+        top = min(max(0.0, y - offset), height * (1.0 - span))
+        try:
+            self.canvas.yview_moveto(top / height)
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # 标题区背景跟随尺寸（渐变/照片都是按当时宽度生成的图）
+    # ------------------------------------------------------------------
+    def _on_header_configure(self, event) -> None:
+        """标题区尺寸变了（用户把面板拉宽了）→ 攒一下重画背景。
+
+        为什么必须重画：渐变和照片都是**按生成那一刻的宽度**画出来的一张图，拉宽之后
+        右边会露出一条没画到的平色带（用户截图里的"颜色不会自动扩展"就是这个）。
+        Configure 在拖拽过程中会连着来，所以攒 90ms 只重画最后一次。
+        """
+        if getattr(self, "_closing", False):
+            return
+        if not (getattr(self, "_theme_picture", None) or getattr(self, "_theme_gradient", None)):
+            return
+        if event.width == getattr(self, "_header_backdrop_width", None):
+            return
+        job = getattr(self, "_header_repaint_job", None)
+        if job:
+            try:
+                self.root.after_cancel(job)
+            except tk.TclError:
+                pass
+        try:
+            self._header_repaint_job = self.root.after(90, self._repaint_header_backdrop)
+        except tk.TclError:
+            pass
+
+    def _repaint_header_backdrop(self) -> None:
+        self._header_repaint_job = None
+        if getattr(self, "_closing", False):
+            return
+        try:
+            self._show_header_photo()
+        except tk.TclError:
+            pass
 
     def _snap_to_top(self) -> None:
         """把时间线钉在滚动区**最上方**。
@@ -1664,11 +1861,16 @@ class AgendaPanel:
             else:
                 photo_palette = backdrop.palette_from_image(picture)
         palette = palettes.palette_for(mode, photo_palette=photo_palette)
-        return {"mode": mode, "palette": palette, "picture": picture, "note": note}
+        return {"mode": mode, "palette": palette, "picture": picture, "note": note,
+                "gradient": palettes.sky_gradient(mode, palette=palette)}
 
     def _apply_palette(self, state: dict) -> None:
+        # 换色**之前**先记下旧值：`_recolor_widgets` 靠"旧值 → 新值"的映射
+        # 把整棵控件树换过来（见那里的注释：用户那条"黑边"就是漏刷控件造成的）。
+        self._theme_previous = dict(theme.COLORS)
         theme.apply_palette(state["palette"])
         self._theme_picture = state.get("picture")
+        self._theme_gradient = state.get("gradient")
 
     def _apply_theme(self, *, force: bool = False) -> None:
         """重新解析主题并**当场**套用到已有控件上。
@@ -1685,6 +1887,12 @@ class AgendaPanel:
         self._apply_palette(state)
         self._sync_slot()
         if changed:
+            # 卡片是**缓存复用**的（内容没变就不重建控件）：不清缓存的话，
+            # 换主题后旧卡片会带着上一套配色的底色留下来 —— 浅色主题上冒出深色卡片、
+            # 深色主题上冒出白卡片，而字已经换成新主题的颜色，直接看不清。
+            # （`test_theme_modes` 那条"实拍级可读性"用例就是这么抓出来的。）
+            self._card_cache.clear()
+            self._card_paint.clear()
             self._recolor_widgets()
             self._show_header_photo()
             self.refresh()
@@ -1715,9 +1923,16 @@ class AgendaPanel:
         """
         colors = theme.COLORS
         targets: list[tuple] = [
+            # 窗口自身的底色：它被 outer 盖住，本来不该露出来；万一露了（改了内边距之类）
+            # 也必须是当前主题的底色，不能是"启动那一刻"的颜色
+            (self.root, "bg", "bg"),
             (self.outer, "bg", "border"),
             (self.shell, "bg", "bg"),
+            # 右侧拖拽把手 / 右下缩放手柄：**这两个就是用户看到的"黑边"**，必须跟着换
+            (getattr(self, "_resize_edge", None), "bg", "bg"),
+            (getattr(self, "_resize_corner", None), "bg", "bg"),
             (getattr(self, "header", None), "bg", "bg_soft"),
+            (getattr(self, "header_canvas", None), "bg", "bg_soft"),
             (self.clock_label, "bg", "bg_soft"),
             (self.clock_label, "fg", "text"),
             (self.date_label, "bg", "bg_soft"),
@@ -1737,17 +1952,51 @@ class AgendaPanel:
         return [(widget, option, key) for widget, option, key in targets if widget is not None]
 
     def _recolor_widgets(self) -> None:
+        """把面板上**所有**控件从旧配色换到新配色。
+
+        以前是一张写死的控件清单（`_theme_targets`），**漏一个就留一块旧颜色**。
+        用户截图里那条"黑边"就是这么来的：右侧 7px 的拖拽把手（`_resize_edge`）和
+        右下角 14×14 的缩放手柄（`_resize_corner`）建的时候取了当时的
+        `theme.COLORS["bg"]`，之后没人改过它们 —— 面板昨晚以「深夜」配色启动、
+        早上 9 点自动切到「白天」，那两条就还是深夜的 `#0C1119`，贴在浅色面板上
+        就是一根黑边（右下角那格是同样的道理）。
+
+        现在改成**按颜色值整体替换**：先算出"旧配色 → 新配色"的映射，
+        再遍历整棵控件树，凡当前值等于旧配色里某个颜色的选项就换成新值。
+        以后新增控件不用再记着往清单里加；`_theme_targets` 留作兜底
+        （有些调用方会绕过 `_apply_palette` 直接换色，那时没有"旧值"可比）。
+        """
         colors = theme.COLORS
+        previous = getattr(self, "_theme_previous", None) or {}
+        mapping: dict[str, str] = {}
+        for key, value in previous.items():
+            if key in colors and str(value).upper() != str(colors[key]).upper():
+                mapping[str(value).upper()] = colors[key]
+        if mapping:
+            for widget in _walk_widgets(self.root):
+                for option in COLOR_OPTIONS:
+                    try:
+                        current = str(widget.cget(option))
+                    except (tk.TclError, AttributeError):
+                        continue
+                    replacement = mapping.get(current.upper())
+                    if replacement is None:
+                        continue
+                    try:
+                        widget.configure(**{option: replacement})
+                    except tk.TclError:
+                        pass
+        # 兜底清单：确保启动时建的那批"骨架"控件一定是新配色
         for widget, option, key in self._theme_targets():
             try:
                 widget.configure(**{option: colors[key]})
             except (tk.TclError, AttributeError):
                 pass
         try:
-            # 滚动条是 ttk 之外的原生控件，颜色得单独喂
-            self.scrollbar.configure(troughcolor=colors["bg_soft"],
-                                     background=colors["text_faint"],
-                                     activebackground=colors["accent"])
+            # 滚动条是**自绘**的：底色跟着主题，滑块颜色重画一次就行
+            # （原生的 tk.Scrollbar 在 Windows 上由系统绘制、不吃颜色，已弃用）
+            self.scrollbar.configure(bg=colors["bg"])
+            self._draw_scrollbar()
         except tk.TclError:
             pass
         self._draw_gear(colors["text_dim"])
@@ -1811,25 +2060,34 @@ class AgendaPanel:
                 continue
             y = (box[3] if box else y) + int(1 * scale)
         try:
-            self.header.configure(height=y + int(6 * scale))
+            # 渐变模式给天空多留一点高度：标题区太矮的话"日出/日落"只剩一条边，
+            # 用户要的就是那片天。文字本身的高度没变，只是下面多留一段渐变。
+            extra = int(26 * scale) if getattr(self, "_theme_gradient", None) else int(6 * scale)
+            self.header.configure(height=y + extra)
         except tk.TclError:
             pass
 
     def _show_header_photo(self) -> None:
-        """照片模式：把照片铺在顶部标题区，时钟/日期/下一项 画在照片上。
+        """在顶部标题区铺一层**背景**，再把时钟 / 日期 / 下一项画在它上面。
 
-        为什么文字要换成 Canvas 文本：Tk 的控件**不透明**，Label 的底色会把照片
-        整条盖住（详见 `_paint_header_text`）。整屏照片背景得把面板主体改成 Canvas
-        自绘才行（那是另一档工作量）；顶部这一条既能真正看到照片，又不影响正文可读性，
-        窗口的其余部分用从照片里算出来的配色，整体是一套的。
+        两种背景：
+          * **照片模式**：铺用户自己的照片；
+          * **随时刻模式**：铺一条竖向渐变（清晨日出 / 白天淡天蓝 / 黄昏日落 / 深夜夜空）
+            —— 这就是用户要的"日出日落渐变主题"。
+
+        为什么文字要换成 Canvas 文本：Tk 的控件**不透明**，Label 的底色会把背景
+        整条盖住（详见 `_paint_header_text`）。整屏背景得把面板主体改成 Canvas
+        自绘才行（那是另一档工作量）；顶部这一条既能真正看到渐变/照片，
+        又不影响正文可读性，窗口其余部分用同一套配色，整体是一体的。
         """
         header = getattr(self, "header", None)
         canvas = getattr(self, "header_canvas", None)
         if header is None or canvas is None:
             return
         picture = self._theme_picture
+        gradient = getattr(self, "_theme_gradient", None)
         try:
-            if picture is None:
+            if picture is None and gradient is None:
                 canvas.delete("all")
                 canvas.place_forget()
                 self._header_photo = None
@@ -1844,24 +2102,35 @@ class AgendaPanel:
 
             width = max(1, header.winfo_width() or self.width)
             height = max(1, header.winfo_height() or int(90 * self.scale))
-            # 按标题区尺寸重新缩放：照片实际显示多大就解多大，不做无谓的放大
-            scaled = backdrop.load_background(self.data_dir, max_width=width)
-            if scaled is None:
-                return
+            if picture is None:
+                # 渐变：按标题区尺寸现算（实测不到 2 ms），不用像照片那样裁剪。
+                # 只有「随时刻」会走到这里（端点来自 palettes.sky_gradient）。
+                scaled = backdrop.gradient(width, height, gradient[0], gradient[1])
+            else:
+                # 按标题区尺寸重新缩放：照片实际显示多大就解多大，不做无谓的放大
+                scaled = backdrop.load_background(self.data_dir, max_width=width)
+                if scaled is None:
+                    return
+                # 高度裁到标题区那么大——按宽度缩放后高度不一定刚好。
+                # 从**偏上**的位置取（1/3 处）：照片的视觉重心通常在那儿，
+                # 直接取最上面一条常常是一片天空/一面墙，看着还像"照片没生效"。
+                if scaled.height > height:
+                    top = max(0, (scaled.height - height) // 3)
+                    scaled = backdrop.crop(scaled, 0, top, scaled.width, height)
             scrim = theme.COLORS["bg_soft"]
-            # 高度裁到标题区那么大——按宽度缩放后高度不一定刚好。
-            # 从**偏上**的位置取（1/3 处）：照片的视觉重心通常在那儿，
-            # 直接取最上面一条常常是一片天空/一面墙，看着还像"照片没生效"。
-            if scaled.height > height:
-                top = max(0, (scaled.height - height) // 3)
-                scaled = backdrop.crop(scaled, 0, top, scaled.width, height)
             # 渐变**必须算进像素**：Tk 的 Canvas 矩形是不透明的，叠几条上去等于把照片
             # 盖成一堆纯色（原来就是这么写的，用户看到"选了照片没反应"）。
             # 上淡下浓：上面尽量看得见照片，往下渐渐化进面板底色，压在上面的字也就不糊。
             # 强度别调太重：第一版给到 0.34/0.80，实拍出来照片像隔了一层毛玻璃
             # （用户的原话是"没有反应"，太淡等于白做）。文字的可读性由 readable_ink 负责，
             # 不靠压低照片来换。
-            fade = backdrop.vertical_fade(scaled, scrim, top=0.16, bottom=0.68)
+            #
+            # 渐变（随时刻）用更轻的一档：照片有细节，化太快会糊；而渐变的"日出/日落"
+            # 本来就是靠颜色本身表达，化掉就白做了。实测 0.16/0.68 时暖金几乎看不见。
+            if picture is None:
+                fade = backdrop.vertical_fade(scaled, scrim, top=0.04, bottom=0.44)
+            else:
+                fade = backdrop.vertical_fade(scaled, scrim, top=0.16, bottom=0.68)
             self._header_photo = backdrop.to_photoimage(self.root, fade)
             canvas.delete("all")
             canvas.configure(width=width, height=fade.height, bg=scrim)
@@ -1879,6 +2148,8 @@ class AgendaPanel:
                 pass
             canvas.place(x=0, y=0, relwidth=1, relheight=1)
             _lower_widget(canvas)
+            # 记下这张背景图是按多宽生成的：`_on_header_configure` 靠它判断要不要重画
+            self._header_backdrop_width = width
             # 让"下一项"按新底色重挑一次字色，再把三行字画到照片上。
             # 只在时间线已经建好时做：构造期 `_show_header_photo()` 早于第一次
             # `refresh()`，那时 `_render_next()` 的断言会炸（被下面的兜底 except 吞掉，
@@ -2563,8 +2834,11 @@ class AgendaPanel:
     # -- 节日主题边框 ----------------------------------------------------
     #: 平时边框粗细（像素，逻辑像素）
     FRAME_PAD = 1
-    #: 节日期间边框粗细
-    FESTIVAL_FRAME_PAD = 3
+    #: 节日期间边框粗细。
+    #: 用户反馈"这个节日边框太细了"——原来是 3（逻辑像素，125% 缩放下属 3.75 物理像素），
+    #: 贴在浅色面板上几乎看不出来。6 约等于一支细马克笔的宽度：节日感出来了，
+    #: 又不至于挤占正文（面板宽度由用户自己定，它只吃 6px）。
+    FESTIVAL_FRAME_PAD = 6
 
     def _apply_festival_frame(self, festival: Festival | None) -> None:
         """把窗口边框换成节日主色（没有节日时恢复成普通的细边框）。"""
@@ -2578,6 +2852,8 @@ class AgendaPanel:
                 self.shell.pack_configure(padx=self.FESTIVAL_FRAME_PAD,
                                           pady=self.FESTIVAL_FRAME_PAD)
                 self._festival_frame_color = festival.accent
+            # 边框变粗了/变细了，拖拽把手得跟着让开，否则又把右边框盖掉
+            self._place_resize_grips()
         except tk.TclError:
             pass
 
@@ -2806,7 +3082,7 @@ class AgendaPanel:
             return
 
         for index, card in enumerate(section.cards):
-            key = card_key(card)
+            key = card_cache_key(card)
             widget = cache.get(key)
             if widget is not None and widget.winfo_exists():
                 # 内容没变：直接摆回去，只刷新进度/状态相关的画法
@@ -2962,7 +3238,7 @@ class AgendaPanel:
             bar.bind("<Configure>", draw_bar)
             draw_bar()
 
-        self._card_paint[card_key(card)] = (draw_axis, draw_bar)
+        self._card_paint[card_cache_key(card)] = (draw_axis, draw_bar)
         return row
 
     def _refresh_card_dynamics(self, key: tuple) -> None:
